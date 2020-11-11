@@ -4979,170 +4979,20 @@ static u8 could_be_interest(u32 old_val, u32 new_val, u8 blen, u8 check_le) {
 }
 
 
-/* Take the current entry from the queue, fuzz it for a while. This
-   function is a tad too long... returns 0 if fuzzed successfully, 1 if
-   skipped or bailed out. */
+/* bit flip mutation. returns 0 if successfully, 1 if bailed out
+ * 
+ * len      - length of the case
+ * out_buf  - content of the case
+ */
 
-static u8 fuzz_one(char** argv) {
+static u8 mutation_bit_flip(char** argv, s32 len, u8* out_buf){
 
-  s32 len, fd, temp_len, i, j;
-  u8  *in_buf, *out_buf, *orig_in, *ex_tmp, *eff_map = 0;
-  u64 havoc_queued,  orig_hit_cnt, new_hit_cnt;
-  u32 splice_cycle = 0, perf_score = 100, orig_perf, prev_cksum, eff_cnt = 1;
+  s32 i;
+  u64 orig_hit_cnt, new_hit_cnt;
+  u32 prev_cksum;
 
-  u8  ret_val = 1, doing_det = 0;
-
-  u8  a_collect[MAX_AUTO_EXTRA];
+  u8 a_collect[MAX_AUTO_EXTRA];
   u32 a_len = 0;
-
-#ifdef IGNORE_FINDS
-
-  /* In IGNORE_FINDS mode, skip any entries that weren't in the
-     initial data set. */
-
-  if (queue_cur->depth > 1) return 1;
-
-#else
-
-  if (pending_favored) {
-
-    /* If we have any favored, non-fuzzed new arrivals in the queue,
-       possibly skip to them at the expense of already-fuzzed or non-favored
-       cases. */
-
-    if ((queue_cur->was_fuzzed || !queue_cur->favored) &&
-        UR(100) < SKIP_TO_NEW_PROB) return 1;
-
-  } else if (!dumb_mode && !queue_cur->favored && queued_paths > 10) {
-
-    /* Otherwise, still possibly skip non-favored cases, albeit less often.
-       The odds of skipping stuff are higher for already-fuzzed inputs and
-       lower for never-fuzzed entries. */
-
-    if (queue_cycle > 1 && !queue_cur->was_fuzzed) {
-
-      if (UR(100) < SKIP_NFAV_NEW_PROB) return 1;
-
-    } else {
-
-      if (UR(100) < SKIP_NFAV_OLD_PROB) return 1;
-
-    }
-
-  }
-
-#endif /* ^IGNORE_FINDS */
-
-  if (not_on_tty) {
-    ACTF("Fuzzing test case #%u (%u total, %llu uniq crashes found)...",
-         current_entry, queued_paths, unique_crashes);
-    fflush(stdout);
-  }
-
-  /* Map the test case into memory. */
-
-  fd = open(queue_cur->fname, O_RDONLY);
-
-  if (fd < 0) PFATAL("Unable to open '%s'", queue_cur->fname);
-
-  len = queue_cur->len;
-
-  orig_in = in_buf = mmap(0, len, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
-
-  if (orig_in == MAP_FAILED) PFATAL("Unable to mmap '%s'", queue_cur->fname);
-
-  close(fd);
-
-  /* We could mmap() out_buf as MAP_PRIVATE, but we end up clobbering every
-     single byte anyway, so it wouldn't give us any performance or memory usage
-     benefits. */
-
-  out_buf = ck_alloc_nozero(len);
-
-  subseq_tmouts = 0;
-
-  cur_depth = queue_cur->depth;
-
-  /*******************************************
-   * CALIBRATION (only if failed earlier on) *
-   *******************************************/
-
-  if (queue_cur->cal_failed) {
-
-    u8 res = FAULT_TMOUT;
-
-    if (queue_cur->cal_failed < CAL_CHANCES) {
-
-      /* Reset exec_cksum to tell calibrate_case to re-execute the testcase
-         avoiding the usage of an invalid trace_bits.
-         For more info: https://github.com/AFLplusplus/AFLplusplus/pull/425 */
-
-      queue_cur->exec_cksum = 0;
-
-      res = calibrate_case(argv, queue_cur, in_buf, queue_cycle - 1, 0);
-
-      if (res == FAULT_ERROR)
-        FATAL("Unable to execute target application");
-
-    }
-
-    if (stop_soon || res != crash_mode) {
-      cur_skipped_paths++;
-      goto abandon_entry;
-    }
-
-  }
-
-  /************
-   * TRIMMING *
-   ************/
-
-  if (!dumb_mode && !queue_cur->trim_done) {
-
-    u8 res = trim_case(argv, queue_cur, in_buf);
-
-    if (res == FAULT_ERROR)
-      FATAL("Unable to execute target application");
-
-    if (stop_soon) {
-      cur_skipped_paths++;
-      goto abandon_entry;
-    }
-
-    /* Don't retry trimming, even if it failed. */
-
-    queue_cur->trim_done = 1;
-
-    if (len != queue_cur->len) len = queue_cur->len;
-
-  }
-
-  memcpy(out_buf, in_buf, len);
-
-  /*********************
-   * PERFORMANCE SCORE *
-   *********************/
-
-  orig_perf = perf_score = calculate_score(queue_cur);
-
-  /* Skip right away if -d is given, if we have done deterministic fuzzing on
-     this entry ourselves (was_fuzzed), or if it has gone through deterministic
-     testing in earlier, resumed runs (passed_det). */
-
-  if (skip_deterministic || queue_cur->was_fuzzed || queue_cur->passed_det)
-    goto havoc_stage;
-
-  /* Skip deterministic fuzzing if exec path checksum puts this out of scope
-     for this master instance. */
-
-  if (master_max && (queue_cur->exec_cksum % master_max) != master_id - 1)
-    goto havoc_stage;
-
-  doing_det = 1;
-
-  /*********************************************
-   * SIMPLE BITFLIP (+dictionary construction) *
-   *********************************************/
 
 #define FLIP_BIT(_ar, _b) do { \
     u8* _arf = (u8*)(_ar); \
@@ -5168,7 +5018,7 @@ static u8 fuzz_one(char** argv) {
 
     FLIP_BIT(out_buf, stage_cur);
 
-    if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
+    if (common_fuzz_stuff(argv, out_buf, len)) return 1;
 
     FLIP_BIT(out_buf, stage_cur);
 
@@ -5261,7 +5111,7 @@ static u8 fuzz_one(char** argv) {
     FLIP_BIT(out_buf, stage_cur);
     FLIP_BIT(out_buf, stage_cur + 1);
 
-    if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
+    if (common_fuzz_stuff(argv, out_buf, len)) return 1;
 
     FLIP_BIT(out_buf, stage_cur);
     FLIP_BIT(out_buf, stage_cur + 1);
@@ -5290,7 +5140,7 @@ static u8 fuzz_one(char** argv) {
     FLIP_BIT(out_buf, stage_cur + 2);
     FLIP_BIT(out_buf, stage_cur + 3);
 
-    if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
+    if (common_fuzz_stuff(argv, out_buf, len)) return 1;
 
     FLIP_BIT(out_buf, stage_cur);
     FLIP_BIT(out_buf, stage_cur + 1);
@@ -5303,30 +5153,6 @@ static u8 fuzz_one(char** argv) {
 
   stage_finds[STAGE_FLIP4]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_FLIP4] += stage_max;
-
-  /* Effector map setup. These macros calculate:
-
-     EFF_APOS      - position of a particular file offset in the map.
-     EFF_ALEN      - length of a map with a particular number of bytes.
-     EFF_SPAN_ALEN - map span for a sequence of bytes.
-
-   */
-
-#define EFF_APOS(_p)          ((_p) >> EFF_MAP_SCALE2)
-#define EFF_REM(_x)           ((_x) & ((1 << EFF_MAP_SCALE2) - 1))
-#define EFF_ALEN(_l)          (EFF_APOS(_l) + !!EFF_REM(_l))
-#define EFF_SPAN_ALEN(_p, _l) (EFF_APOS((_p) + (_l) - 1) - EFF_APOS(_p) + 1)
-
-  /* Initialize effector map for the next step (see comments below). Always
-     flag first and last byte as doing something. */
-
-  eff_map    = ck_alloc(EFF_ALEN(len));
-  eff_map[0] = 1;
-
-  if (EFF_APOS(len - 1) != 0) {
-    eff_map[EFF_APOS(len - 1)] = 1;
-    eff_cnt++;
-  }
 
   /* Walking byte. */
 
@@ -5342,54 +5168,11 @@ static u8 fuzz_one(char** argv) {
 
     out_buf[stage_cur] ^= 0xFF;
 
-    if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
-
-    /* We also use this stage to pull off a simple trick: we identify
-       bytes that seem to have no effect on the current execution path
-       even when fully flipped - and we skip them during more expensive
-       deterministic stages, such as arithmetics or known ints. */
-
-    if (!eff_map[EFF_APOS(stage_cur)]) {
-
-      u32 cksum;
-
-      /* If in dumb mode or if the file is very short, just flag everything
-         without wasting time on checksums. */
-
-      if (!dumb_mode && len >= EFF_MIN_LEN)
-        cksum = hash32(trace_bits, MAP_SIZE, HASH_CONST);
-      else
-        cksum = ~queue_cur->exec_cksum;
-
-      if (cksum != queue_cur->exec_cksum) {
-        eff_map[EFF_APOS(stage_cur)] = 1;
-        eff_cnt++;
-      }
-
-    }
+    if (common_fuzz_stuff(argv, out_buf, len)) return 1;
 
     out_buf[stage_cur] ^= 0xFF;
 
   }
-
-  /* If the effector map is more than EFF_MAX_PERC dense, just flag the
-     whole thing as worth fuzzing, since we wouldn't be saving much time
-     anyway. */
-
-  if (eff_cnt != EFF_ALEN(len) &&
-      eff_cnt * 100 / EFF_ALEN(len) > EFF_MAX_PERC) {
-
-    memset(eff_map, 1, EFF_ALEN(len));
-
-    blocks_eff_select += EFF_ALEN(len);
-
-  } else {
-
-    blocks_eff_select += eff_cnt;
-
-  }
-
-  blocks_eff_total += EFF_ALEN(len);
 
   new_hit_cnt = queued_paths + unique_crashes;
 
@@ -5398,7 +5181,7 @@ static u8 fuzz_one(char** argv) {
 
   /* Two walking bytes. */
 
-  if (len < 2) goto skip_bitflip;
+  if (len < 2) return 0;
 
   stage_name  = "bitflip 16/8";
   stage_short = "flip16";
@@ -5409,22 +5192,14 @@ static u8 fuzz_one(char** argv) {
 
   for (i = 0; i < len - 1; i++) {
 
-    /* Let's consult the effector map... */
-
-    if (!eff_map[EFF_APOS(i)] && !eff_map[EFF_APOS(i + 1)]) {
-      stage_max--;
-      continue;
-    }
-
     stage_cur_byte = i;
 
     *(u16*)(out_buf + i) ^= 0xFFFF;
 
-    if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
+    if (common_fuzz_stuff(argv, out_buf, len)) return 1;
     stage_cur++;
 
     *(u16*)(out_buf + i) ^= 0xFFFF;
-
 
   }
 
@@ -5433,7 +5208,7 @@ static u8 fuzz_one(char** argv) {
   stage_finds[STAGE_FLIP16]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_FLIP16] += stage_max;
 
-  if (len < 4) goto skip_bitflip;
+  if (len < 4) return 0;
 
   /* Four walking bytes. */
 
@@ -5446,18 +5221,11 @@ static u8 fuzz_one(char** argv) {
 
   for (i = 0; i < len - 3; i++) {
 
-    /* Let's consult the effector map... */
-    if (!eff_map[EFF_APOS(i)] && !eff_map[EFF_APOS(i + 1)] &&
-        !eff_map[EFF_APOS(i + 2)] && !eff_map[EFF_APOS(i + 3)]) {
-      stage_max--;
-      continue;
-    }
-
     stage_cur_byte = i;
 
     *(u32*)(out_buf + i) ^= 0xFFFFFFFF;
 
-    if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
+    if (common_fuzz_stuff(argv, out_buf, len)) return 1;
     stage_cur++;
 
     *(u32*)(out_buf + i) ^= 0xFFFFFFFF;
@@ -5469,13 +5237,22 @@ static u8 fuzz_one(char** argv) {
   stage_finds[STAGE_FLIP32]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_FLIP32] += stage_max;
 
-skip_bitflip:
+  return 0;
+}
 
-  if (no_arith) goto skip_arith;
 
-  /**********************
-   * ARITHMETIC INC/DEC *
-   **********************/
+/* arithmetic mutation. returns 0 if successfully, 1 if bailed out
+ * 
+ * len      - length of the case
+ * out_buf  - content of the case
+ */
+
+static u8 mutation_arith(char** argv, s32 len, u8* out_buf){
+
+  s32 i, j;
+  u64 orig_hit_cnt, new_hit_cnt;
+
+  if (no_arith) return 0;
 
   /* 8-bit arithmetics. */
 
@@ -5486,18 +5263,11 @@ skip_bitflip:
 
   stage_val_type = STAGE_VAL_LE;
 
-  orig_hit_cnt = new_hit_cnt;
+  orig_hit_cnt = queued_paths + unique_crashes;
 
   for (i = 0; i < len; i++) {
 
     u8 orig = out_buf[i];
-
-    /* Let's consult the effector map... */
-
-    if (!eff_map[EFF_APOS(i)]) {
-      stage_max -= 2 * ARITH_MAX;
-      continue;
-    }
 
     stage_cur_byte = i;
 
@@ -5513,7 +5283,7 @@ skip_bitflip:
         stage_cur_val = j;
         out_buf[i] = orig + j;
 
-        if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
+        if (common_fuzz_stuff(argv, out_buf, len)) return 1;
         stage_cur++;
 
       } else stage_max--;
@@ -5525,7 +5295,7 @@ skip_bitflip:
         stage_cur_val = -j;
         out_buf[i] = orig - j;
 
-        if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
+        if (common_fuzz_stuff(argv, out_buf, len)) return 1;
         stage_cur++;
 
       } else stage_max--;
@@ -5543,7 +5313,7 @@ skip_bitflip:
 
   /* 16-bit arithmetics, both endians. */
 
-  if (len < 2) goto skip_arith;
+  if (len < 2) return 0;
 
   stage_name  = "arith 16/8";
   stage_short = "arith16";
@@ -5555,13 +5325,6 @@ skip_bitflip:
   for (i = 0; i < len - 1; i++) {
 
     u16 orig = *(u16*)(out_buf + i);
-
-    /* Let's consult the effector map... */
-
-    if (!eff_map[EFF_APOS(i)] && !eff_map[EFF_APOS(i + 1)]) {
-      stage_max -= 4 * ARITH_MAX;
-      continue;
-    }
 
     stage_cur_byte = i;
 
@@ -5584,7 +5347,7 @@ skip_bitflip:
         stage_cur_val = j;
         *(u16*)(out_buf + i) = orig + j;
 
-        if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
+        if (common_fuzz_stuff(argv, out_buf, len)) return 1;
         stage_cur++;
  
       } else stage_max--;
@@ -5594,7 +5357,7 @@ skip_bitflip:
         stage_cur_val = -j;
         *(u16*)(out_buf + i) = orig - j;
 
-        if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
+        if (common_fuzz_stuff(argv, out_buf, len)) return 1;
         stage_cur++;
 
       } else stage_max--;
@@ -5609,7 +5372,7 @@ skip_bitflip:
         stage_cur_val = j;
         *(u16*)(out_buf + i) = SWAP16(SWAP16(orig) + j);
 
-        if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
+        if (common_fuzz_stuff(argv, out_buf, len)) return 1;
         stage_cur++;
 
       } else stage_max--;
@@ -5619,7 +5382,7 @@ skip_bitflip:
         stage_cur_val = -j;
         *(u16*)(out_buf + i) = SWAP16(SWAP16(orig) - j);
 
-        if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
+        if (common_fuzz_stuff(argv, out_buf, len)) return 1;
         stage_cur++;
 
       } else stage_max--;
@@ -5637,7 +5400,7 @@ skip_bitflip:
 
   /* 32-bit arithmetics, both endians. */
 
-  if (len < 4) goto skip_arith;
+  if (len < 4) return 0;
 
   stage_name  = "arith 32/8";
   stage_short = "arith32";
@@ -5649,14 +5412,6 @@ skip_bitflip:
   for (i = 0; i < len - 3; i++) {
 
     u32 orig = *(u32*)(out_buf + i);
-
-    /* Let's consult the effector map... */
-
-    if (!eff_map[EFF_APOS(i)] && !eff_map[EFF_APOS(i + 1)] &&
-        !eff_map[EFF_APOS(i + 2)] && !eff_map[EFF_APOS(i + 3)]) {
-      stage_max -= 4 * ARITH_MAX;
-      continue;
-    }
 
     stage_cur_byte = i;
 
@@ -5677,7 +5432,7 @@ skip_bitflip:
         stage_cur_val = j;
         *(u32*)(out_buf + i) = orig + j;
 
-        if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
+        if (common_fuzz_stuff(argv, out_buf, len)) return 1;
         stage_cur++;
 
       } else stage_max--;
@@ -5687,7 +5442,7 @@ skip_bitflip:
         stage_cur_val = -j;
         *(u32*)(out_buf + i) = orig - j;
 
-        if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
+        if (common_fuzz_stuff(argv, out_buf, len)) return 1;
         stage_cur++;
 
       } else stage_max--;
@@ -5701,7 +5456,7 @@ skip_bitflip:
         stage_cur_val = j;
         *(u32*)(out_buf + i) = SWAP32(SWAP32(orig) + j);
 
-        if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
+        if (common_fuzz_stuff(argv, out_buf, len)) return 1;
         stage_cur++;
 
       } else stage_max--;
@@ -5711,7 +5466,7 @@ skip_bitflip:
         stage_cur_val = -j;
         *(u32*)(out_buf + i) = SWAP32(SWAP32(orig) - j);
 
-        if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
+        if (common_fuzz_stuff(argv, out_buf, len)) return 1;
         stage_cur++;
 
       } else stage_max--;
@@ -5726,12 +5481,21 @@ skip_bitflip:
 
   stage_finds[STAGE_ARITH32]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_ARITH32] += stage_max;
+  
+  return 0;
+}
 
-skip_arith:
 
-  /**********************
-   * INTERESTING VALUES *
-   **********************/
+/* interesting mutation. returns 0 if successfully, 1 if bailed out
+ * 
+ * len      - length of the case
+ * out_buf  - content of the case
+ */
+
+static u8 mutation_interest(char** argv, s32 len, u8* out_buf){
+
+  s32 i, j;
+  u64 orig_hit_cnt, new_hit_cnt;
 
   stage_name  = "interest 8/8";
   stage_short = "int8";
@@ -5740,20 +5504,13 @@ skip_arith:
 
   stage_val_type = STAGE_VAL_LE;
 
-  orig_hit_cnt = new_hit_cnt;
+  orig_hit_cnt = queued_paths + unique_crashes;
 
   /* Setting 8-bit integers. */
 
   for (i = 0; i < len; i++) {
 
     u8 orig = out_buf[i];
-
-    /* Let's consult the effector map... */
-
-    if (!eff_map[EFF_APOS(i)]) {
-      stage_max -= sizeof(interesting_8);
-      continue;
-    }
 
     stage_cur_byte = i;
 
@@ -5770,7 +5527,7 @@ skip_arith:
       stage_cur_val = interesting_8[j];
       out_buf[i] = interesting_8[j];
 
-      if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
+      if (common_fuzz_stuff(argv, out_buf, len)) return 1;
 
       out_buf[i] = orig;
       stage_cur++;
@@ -5786,7 +5543,7 @@ skip_arith:
 
   /* Setting 16-bit integers, both endians. */
 
-  if (no_arith || len < 2) goto skip_interest;
+  if (no_arith || len < 2) return 0;
 
   stage_name  = "interest 16/8";
   stage_short = "int16";
@@ -5798,13 +5555,6 @@ skip_arith:
   for (i = 0; i < len - 1; i++) {
 
     u16 orig = *(u16*)(out_buf + i);
-
-    /* Let's consult the effector map... */
-
-    if (!eff_map[EFF_APOS(i)] && !eff_map[EFF_APOS(i + 1)]) {
-      stage_max -= sizeof(interesting_16);
-      continue;
-    }
 
     stage_cur_byte = i;
 
@@ -5823,7 +5573,7 @@ skip_arith:
 
         *(u16*)(out_buf + i) = interesting_16[j];
 
-        if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
+        if (common_fuzz_stuff(argv, out_buf, len)) return 1;
         stage_cur++;
 
       } else stage_max--;
@@ -5836,7 +5586,7 @@ skip_arith:
         stage_val_type = STAGE_VAL_BE;
 
         *(u16*)(out_buf + i) = SWAP16(interesting_16[j]);
-        if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
+        if (common_fuzz_stuff(argv, out_buf, len)) return 1;
         stage_cur++;
 
       } else stage_max--;
@@ -5852,7 +5602,7 @@ skip_arith:
   stage_finds[STAGE_INTEREST16]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_INTEREST16] += stage_max;
 
-  if (len < 4) goto skip_interest;
+  if (len < 4) return 0;
 
   /* Setting 32-bit integers, both endians. */
 
@@ -5866,14 +5616,6 @@ skip_arith:
   for (i = 0; i < len - 3; i++) {
 
     u32 orig = *(u32*)(out_buf + i);
-
-    /* Let's consult the effector map... */
-
-    if (!eff_map[EFF_APOS(i)] && !eff_map[EFF_APOS(i + 1)] &&
-        !eff_map[EFF_APOS(i + 2)] && !eff_map[EFF_APOS(i + 3)]) {
-      stage_max -= sizeof(interesting_32) >> 1;
-      continue;
-    }
 
     stage_cur_byte = i;
 
@@ -5892,7 +5634,7 @@ skip_arith:
 
         *(u32*)(out_buf + i) = interesting_32[j];
 
-        if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
+        if (common_fuzz_stuff(argv, out_buf, len)) return 1;
         stage_cur++;
 
       } else stage_max--;
@@ -5905,7 +5647,7 @@ skip_arith:
         stage_val_type = STAGE_VAL_BE;
 
         *(u32*)(out_buf + i) = SWAP32(interesting_32[j]);
-        if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
+        if (common_fuzz_stuff(argv, out_buf, len)) return 1;
         stage_cur++;
 
       } else stage_max--;
@@ -5921,11 +5663,22 @@ skip_arith:
   stage_finds[STAGE_INTEREST32]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_INTEREST32] += stage_max;
 
-skip_interest:
+  return 0;
+}
 
-  /********************
-   * DICTIONARY STUFF *
-   ********************/
+
+/* dictionary mutation. returns 0 if successfully, 1 if bailed out
+ * 
+ * len      - length of the case
+ * out_buf  - content of the case
+ * in_buf   - origin content of the case
+ */
+
+static u8 mutation_dictionary(char** argv, s32 len, u8* out_buf, u8* in_buf){
+
+  s32 i, j;
+  u8 *ex_tmp;
+  u64 orig_hit_cnt, new_hit_cnt;
 
   if (!extras_cnt) goto skip_user_extras;
 
@@ -5938,7 +5691,7 @@ skip_interest:
 
   stage_val_type = STAGE_VAL_NONE;
 
-  orig_hit_cnt = new_hit_cnt;
+  orig_hit_cnt = queued_paths + unique_crashes;
 
   for (i = 0; i < len; i++) {
 
@@ -5960,8 +5713,7 @@ skip_interest:
 
       if ((extras_cnt > MAX_DET_EXTRAS && UR(extras_cnt) >= MAX_DET_EXTRAS) ||
           extras[j].len > len - i ||
-          !memcmp(extras[j].data, out_buf + i, extras[j].len) ||
-          !memchr(eff_map + EFF_APOS(i), 1, EFF_SPAN_ALEN(i, extras[j].len))) {
+          !memcmp(extras[j].data, out_buf + i, extras[j].len)) {
 
         stage_max--;
         continue;
@@ -5971,7 +5723,7 @@ skip_interest:
       last_len = extras[j].len;
       memcpy(out_buf + i, extras[j].data, last_len);
 
-      if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
+      if (common_fuzz_stuff(argv, out_buf, len)) return 1;
 
       stage_cur++;
 
@@ -6017,7 +5769,7 @@ skip_interest:
 
       if (common_fuzz_stuff(argv, ex_tmp, len + extras[j].len)) {
         ck_free(ex_tmp);
-        goto abandon_entry;
+        return 1;
       }
 
       stage_cur++;
@@ -6038,7 +5790,7 @@ skip_interest:
 
 skip_user_extras:
 
-  if (!a_extras_cnt) goto skip_extras;
+  if (!a_extras_cnt) return 0;
 
   stage_name  = "auto extras (over)";
   stage_short = "ext_AO";
@@ -6047,7 +5799,7 @@ skip_user_extras:
 
   stage_val_type = STAGE_VAL_NONE;
 
-  orig_hit_cnt = new_hit_cnt;
+  orig_hit_cnt = queued_paths + unique_crashes;
 
   for (i = 0; i < len; i++) {
 
@@ -6060,8 +5812,7 @@ skip_user_extras:
       /* See the comment in the earlier code; extras are sorted by size. */
 
       if (a_extras[j].len > len - i ||
-          !memcmp(a_extras[j].data, out_buf + i, a_extras[j].len) ||
-          !memchr(eff_map + EFF_APOS(i), 1, EFF_SPAN_ALEN(i, a_extras[j].len))) {
+          !memcmp(a_extras[j].data, out_buf + i, a_extras[j].len)) {
 
         stage_max--;
         continue;
@@ -6071,7 +5822,7 @@ skip_user_extras:
       last_len = a_extras[j].len;
       memcpy(out_buf + i, a_extras[j].data, last_len);
 
-      if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
+      if (common_fuzz_stuff(argv, out_buf, len)) return 1;
 
       stage_cur++;
 
@@ -6087,17 +5838,26 @@ skip_user_extras:
   stage_finds[STAGE_EXTRAS_AO]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_EXTRAS_AO] += stage_max;
 
-skip_extras:
+  return 0;
+}
 
-  /* If we made this to here without jumping to havoc_stage or abandon_entry,
-     we're properly done with deterministic steps and can mark it as such
-     in the .state/ directory. */
 
-  if (!queue_cur->passed_det) mark_as_det_done(queue_cur);
+/* havoc mutation. returns 0 if successfully, 1 if bailed out
+ * 
+ * len      - length of the case
+ * out_buf  - content of the case
+ */
 
-  /****************
-   * RANDOM HAVOC *
-   ****************/
+static u8 mutation_havoc_splicing(char** argv, s32 len, u8** p_out_buf, u8** p_in_buf){
+
+  s32 temp_len, fd, i;
+  u8  *orig_in, *in_buf, *out_buf;
+  u64 havoc_queued, orig_hit_cnt, new_hit_cnt;
+  u32 splice_cycle = 0, perf_score = 100, orig_perf;
+
+  out_buf = *p_out_buf;
+  orig_in = in_buf = *p_in_buf;
+  orig_perf = perf_score = calculate_score(queue_cur);
 
 havoc_stage:
 
@@ -6110,8 +5870,7 @@ havoc_stage:
 
     stage_name  = "havoc";
     stage_short = "havoc";
-    stage_max   = (doing_det ? HAVOC_CYCLES_INIT : HAVOC_CYCLES) *
-                  perf_score / havoc_div / 100;
+    stage_max   = HAVOC_CYCLES * perf_score / havoc_div / 100;
 
   } else {
 
@@ -6388,7 +6147,7 @@ havoc_stage:
                    temp_len - clone_to);
 
             ck_free(out_buf);
-            out_buf = new_buf;
+            *p_out_buf = out_buf = new_buf;
             temp_len += clone_len;
 
           }
@@ -6506,7 +6265,7 @@ havoc_stage:
                    temp_len - insert_at);
 
             ck_free(out_buf);
-            out_buf   = new_buf;
+            *p_out_buf = out_buf   = new_buf;
             temp_len += extra_len;
 
             break;
@@ -6518,12 +6277,13 @@ havoc_stage:
     }
 
     if (common_fuzz_stuff(argv, out_buf, temp_len))
-      goto abandon_entry;
+      return 1;
 
     /* out_buf might have been mangled a bit, so let's restore it to its
        original size and shape. */
 
-    if (temp_len < len) out_buf = ck_realloc(out_buf, len);
+    if (temp_len < len) 
+      *p_out_buf = out_buf = ck_realloc(out_buf, len);
     temp_len = len;
     memcpy(out_buf, in_buf, len);
 
@@ -6579,7 +6339,7 @@ retry_splicing:
 
     if (in_buf != orig_in) {
       ck_free(in_buf);
-      in_buf = orig_in;
+      *p_in_buf = in_buf = orig_in;
       len = queue_cur->len;
     }
 
@@ -6633,17 +6393,192 @@ retry_splicing:
 
     len = target->len;
     memcpy(new_buf, in_buf, split_at);
-    in_buf = new_buf;
+    *p_in_buf = in_buf = new_buf;
 
     ck_free(out_buf);
-    out_buf = ck_alloc_nozero(len);
+    *p_out_buf = out_buf = ck_alloc_nozero(len);
     memcpy(out_buf, in_buf, len);
 
     goto havoc_stage;
 
   }
 
+  return 0;
+
 #endif /* !IGNORE_FINDS */
+
+}
+
+
+/* Take the current entry from the queue, fuzz it for a while. This
+   function is a tad too long... returns 0 if fuzzed successfully, 1 if
+   skipped or bailed out. */
+
+static u8 fuzz_one(char** argv) {
+
+  s32 len, fd;
+  u8  *in_buf, *out_buf, *orig_in;
+  u8  ret_val = 1;
+
+#ifdef IGNORE_FINDS
+
+  /* In IGNORE_FINDS mode, skip any entries that weren't in the
+     initial data set. */
+
+  if (queue_cur->depth > 1) return 1;
+
+#else
+
+  if (pending_favored) {
+
+    /* If we have any favored, non-fuzzed new arrivals in the queue,
+       possibly skip to them at the expense of already-fuzzed or non-favored
+       cases. */
+
+    if ((queue_cur->was_fuzzed || !queue_cur->favored) &&
+        UR(100) < SKIP_TO_NEW_PROB) return 1;
+
+  } else if (!dumb_mode && !queue_cur->favored && queued_paths > 10) {
+
+    /* Otherwise, still possibly skip non-favored cases, albeit less often.
+       The odds of skipping stuff are higher for already-fuzzed inputs and
+       lower for never-fuzzed entries. */
+
+    if (queue_cycle > 1 && !queue_cur->was_fuzzed) {
+
+      if (UR(100) < SKIP_NFAV_NEW_PROB) return 1;
+
+    } else {
+
+      if (UR(100) < SKIP_NFAV_OLD_PROB) return 1;
+
+    }
+
+  }
+
+#endif /* ^IGNORE_FINDS */
+
+  if (not_on_tty) {
+    ACTF("Fuzzing test case #%u (%u total, %llu uniq crashes found)...",
+         current_entry, queued_paths, unique_crashes);
+    fflush(stdout);
+  }
+
+  /* Map the test case into memory. */
+
+  fd = open(queue_cur->fname, O_RDONLY);
+
+  if (fd < 0) PFATAL("Unable to open '%s'", queue_cur->fname);
+
+  len = queue_cur->len;
+
+  orig_in = in_buf = mmap(0, len, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
+
+  if (orig_in == MAP_FAILED) PFATAL("Unable to mmap '%s'", queue_cur->fname);
+
+  close(fd);
+
+  /* We could mmap() out_buf as MAP_PRIVATE, but we end up clobbering every
+     single byte anyway, so it wouldn't give us any performance or memory usage
+     benefits. */
+
+  out_buf = ck_alloc_nozero(len);
+
+  subseq_tmouts = 0;
+
+  cur_depth = queue_cur->depth;
+
+  /*******************************************
+   * CALIBRATION (only if failed earlier on) *
+   *******************************************/
+
+  if (queue_cur->cal_failed) {
+
+    u8 res = FAULT_TMOUT;
+
+    if (queue_cur->cal_failed < CAL_CHANCES) {
+
+      /* Reset exec_cksum to tell calibrate_case to re-execute the testcase
+         avoiding the usage of an invalid trace_bits.
+         For more info: https://github.com/AFLplusplus/AFLplusplus/pull/425 */
+
+      queue_cur->exec_cksum = 0;
+
+      res = calibrate_case(argv, queue_cur, in_buf, queue_cycle - 1, 0);
+
+      if (res == FAULT_ERROR)
+        FATAL("Unable to execute target application");
+
+    }
+
+    if (stop_soon || res != crash_mode) {
+      cur_skipped_paths++;
+      goto abandon_entry;
+    }
+
+  }
+
+  /************
+   * TRIMMING *
+   ************/
+
+  if (!dumb_mode && !queue_cur->trim_done) {
+
+    u8 res = trim_case(argv, queue_cur, in_buf);
+
+    if (res == FAULT_ERROR)
+      FATAL("Unable to execute target application");
+
+    if (stop_soon) {
+      cur_skipped_paths++;
+      goto abandon_entry;
+    }
+
+    /* Don't retry trimming, even if it failed. */
+
+    queue_cur->trim_done = 1;
+
+    if (len != queue_cur->len) len = queue_cur->len;
+
+  }
+
+  memcpy(out_buf, in_buf, len);
+
+  /* Skip right away if -d is given, if we have done deterministic fuzzing on
+     this entry ourselves (was_fuzzed), or if it has gone through deterministic
+     testing in earlier, resumed runs (passed_det). */
+
+  if (skip_deterministic || queue_cur->was_fuzzed || queue_cur->passed_det)
+    goto havoc_entry;
+
+  /* Skip deterministic fuzzing if exec path checksum puts this out of scope
+     for this master instance. */
+
+  if (master_max && (queue_cur->exec_cksum % master_max) != master_id - 1)
+    goto havoc_entry;
+
+  if(mutation_bit_flip(argv, len, out_buf)) 
+    goto abandon_entry;
+
+  if(mutation_arith(argv, len, out_buf))
+    goto abandon_entry;
+
+  if(mutation_interest(argv, len, out_buf))
+    goto abandon_entry;
+
+  if(mutation_dictionary(argv, len, out_buf, in_buf))
+    goto abandon_entry;
+
+  /* If we made this to here without jumping to havoc_stage or abandon_entry,
+     we're properly done with deterministic steps and can mark it as such
+     in the .state/ directory. */
+
+  if (!queue_cur->passed_det) mark_as_det_done(queue_cur);
+
+havoc_entry:
+
+  if(mutation_havoc_splicing(argv, len, &out_buf, &in_buf))
+    goto abandon_entry;
 
   ret_val = 0;
 
@@ -6664,7 +6599,6 @@ abandon_entry:
 
   if (in_buf != orig_in) ck_free(in_buf);
   ck_free(out_buf);
-  ck_free(eff_map);
 
   return ret_val;
 
