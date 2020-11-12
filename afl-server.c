@@ -56,6 +56,7 @@
 #include <termios.h>
 #include <dlfcn.h>
 #include <sched.h>
+#include <pthread.h>
 
 #include <sys/wait.h>
 #include <sys/time.h>
@@ -66,6 +67,13 @@
 #include <sys/mman.h>
 #include <sys/ioctl.h>
 #include <sys/file.h>
+#include <sys/epoll.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+
+#include "para_utils/networking.h"
+#include "para_utils/work_queue.h"
 
 #if defined(__APPLE__) || defined(__FreeBSD__) || defined (__OpenBSD__)
 #  include <sys/sysctl.h>
@@ -90,6 +98,10 @@
 /* Lots of globals, but mostly for the status UI and other things where it
    really makes no sense to haul them around as function parameters. */
 
+
+#define MAX_EVENT_COUNT   32    /* epoll最大单次处理事件数 */ 
+#define QUEUE_TIMEOUT     10    /* 任务队列等待超时时间 */
+#define MAX_THEAD_COUNT   8     /* 最大任务线程数 */
 
 EXP_ST u8 *in_dir,                    /* Input directory with test cases  */
           *out_file,                  /* File to fuzz, if any             */
@@ -243,7 +255,7 @@ struct queue_entry {
   u8  cal_failed,                     /* Calibration failed?              */
       trim_done,                      /* Trimmed?                         */
       was_fuzzed,                     /* Had any fuzzing done yet?        */
-      passed_det,                     /* Deterministic stages passed?     */
+      doing_det,                     /* Deterministic stages passed?     */
       has_new_cov,                    /* Triggers new coverage?           */
       var_behavior,                   /* Variable behavior?               */
       favored,                        /* Currently favored?               */
@@ -292,6 +304,28 @@ static s8  interesting_8[]  = { INTERESTING_8 };
 static s16 interesting_16[] = { INTERESTING_8, INTERESTING_16 };
 static s32 interesting_32[] = { INTERESTING_8, INTERESTING_16, INTERESTING_32 };
 
+typedef struct request_task {
+
+  int fd;
+  packet_info_t *pinfo;
+
+} request_task_t;
+
+/* 任务队列 */
+static queue_t *request_queue;
+/* 当前任务线程数 */
+static uint32_t cur_thread_num;
+/* 任务线程数互斥锁 */
+static pthread_mutex_t thread_num_mutex;
+
+/* 种子队列互斥锁 */
+static pthread_mutex_t seed_queue_mutex;
+/* 位图更新互斥锁 */
+static pthread_mutex_t bitmap_mutex;
+
+static u32 seek_to;
+static u64 prev_queued;
+
 /* Fuzzing stages */
 
 enum {
@@ -332,6 +366,14 @@ enum {
   /* 04 */ FAULT_NOINST,
   /* 05 */ FAULT_NOBITS
 };
+
+
+/* 严重错误处理函数 */
+
+static void fatal(const char *s) {
+  perror(s);
+  exit(1);
+}
 
 
 /* Get unix time in milliseconds */
@@ -720,7 +762,7 @@ static void mark_as_det_done(struct queue_entry* q) {
 
   ck_free(fn);
 
-  q->passed_det = 1;
+  q->doing_det = 0;
 
 }
 
@@ -785,14 +827,14 @@ static void mark_as_redundant(struct queue_entry* q, u8 state) {
 
 /* Append new test case to the queue. */
 
-static void add_to_queue(u8* fname, u32 len, u8 passed_det) {
+static void add_to_queue(u8* fname, u32 len, u8 doing_det) {
 
   struct queue_entry* q = ck_alloc(sizeof(struct queue_entry));
 
   q->fname        = fname;
   q->len          = len;
   q->depth        = cur_depth + 1;
-  q->passed_det   = passed_det;
+  q->doing_det   = doing_det;
 
   if (q->depth > max_depth) max_depth = q->depth;
 
@@ -1462,7 +1504,7 @@ static void read_testcases(void) {
     u8* fn = alloc_printf("%s/%s", in_dir, nl[i]->d_name);
     u8* dfn = alloc_printf("%s/.state/deterministic_done/%s", in_dir, nl[i]->d_name);
 
-    u8  passed_det = 0;
+    u8  doing_det = M_BITFLIP;
 
     free(nl[i]); /* not tracked */
  
@@ -1488,10 +1530,10 @@ static void read_testcases(void) {
        fuzzing when resuming aborted scans, because it would be pointless
        and probably very time-consuming. */
 
-    if (!access(dfn, F_OK)) passed_det = 1;
+    if (!access(dfn, F_OK)) doing_det = 0;
     ck_free(dfn);
 
-    add_to_queue(fn, st.st_size, passed_det);
+    add_to_queue(fn, st.st_size, doing_det);
 
   }
 
@@ -3036,7 +3078,7 @@ static void pivot_inputs(void) {
 
     /* Make sure that the passed_det value carries over, too. */
 
-    if (q->passed_det) mark_as_det_done(q);
+    if (!q->doing_det) mark_as_det_done(q);
 
     q = q->next;
     id++;
@@ -4979,6 +5021,429 @@ static u8 could_be_interest(u32 old_val, u32 new_val, u8 blen, u8 check_le) {
 }
 
 
+/* 处理新连接的fuzz节点 */
+
+static int handle_new_client(int listen_fd) {
+
+  tcp_socket_info si;
+
+  si.sfd = accept(listen_fd, 
+            (struct sockaddr*)&si.sock_addr, &si.sock_len);
+
+  // TODO
+  // 初始化节点bitmap extras
+
+  if(si.sfd < 0)
+    return si.sfd;
+
+  printf("[+] new client accepted\n");
+
+  return si.sfd;
+
+}
+
+
+static struct queue_entry* next_seed_info(u8 *stage) {
+
+  struct queue_entry* seed_info;
+  
+  /* 艹 太多全局变量了 */
+  pthread_mutex_lock(&seed_queue_mutex);
+
+  while (1) {
+    
+    if (!queue_cur) {
+
+      queue_cycle++;
+      current_entry     = 0;
+      cur_skipped_paths = 0;
+      queue_cur         = queue;
+
+      while (seek_to) {
+    
+        current_entry++;
+        seek_to--;
+        queue_cur = queue_cur->next;
+
+      }
+
+      show_stats();
+
+      if (not_on_tty) {
+        ACTF("Entering queue cycle %llu.", queue_cycle);
+        fflush(stdout);
+      }
+
+      if (queued_paths == prev_queued) {
+
+        if (use_splicing) cycles_wo_finds++; else use_splicing=1;
+
+      } else cycles_wo_finds = 0;
+
+      prev_queued = queued_paths;
+
+    }
+    
+    /* 若已经完成确定性变异 且不需要 splicing */
+    if(!queue_cur->doing_det || !use_splicing)
+      goto next;
+    
+    if(queue_cur->doing_det != M_BITFLIP)
+      goto skip_prob; 
+
+#ifdef IGNORE_FINDS
+
+    if (queue_cur->depth > 1) goto next;
+
+#else
+
+    if (pending_favored) {
+
+      if ((queue_cur->was_fuzzed || !queue_cur->favored) &&
+          UR(100) < SKIP_TO_NEW_PROB) goto next;
+
+    } else if (!dumb_mode && !queue_cur->favored && queued_paths > 10) {
+
+      if (queue_cycle > 1 && !queue_cur->was_fuzzed) {
+
+        if (UR(100) < SKIP_NFAV_NEW_PROB) goto next;
+
+      } else {
+
+        if (UR(100) < SKIP_NFAV_OLD_PROB) goto next;
+
+      }
+
+    }
+
+#endif /* ^IGNORE_FINDS */
+
+skip_prob:
+
+    seed_info = queue_cur;
+    *stage = queue_cur->doing_det;
+    
+    queue_cur->doing_det--;
+
+    break;
+
+next:
+
+    queue_cur = queue_cur->next;
+    current_entry++;
+
+  }
+
+  pthread_mutex_unlock(&seed_queue_mutex);
+
+  return seed_info;
+
+}
+
+
+/* 处理节点上传的新seed */
+
+static int handle_put_seed(packet_info_t *pinfo) {
+
+  int ret = -1;
+  struct queue_entry *seed_info;
+
+  // TODO:
+  // 文件保存 注意处理文件命名
+
+  printf("[+] receive PUT_SEED request\n");
+
+out:
+  return ret;
+
+}
+
+
+/* 处理节点获取任务的请求 */
+
+static int handle_get_task(int cfd) {
+
+  int fd, ret = -1;
+  uint8_t flag;
+  size_t seed_len;
+  seed_t *seed;
+  struct queue_entry *seed_info;
+  packet_info_t *pinfo;
+
+  seed_info = next_seed_info(&flag);
+
+  fd = open(seed_info->fname, O_RDONLY);
+  if (fd < 0)
+    PFATAL("[-] Unable to open '%s'", seed_info->fname);
+
+  seed_len = seed_info->len;
+
+  seed = (seed_t*)malloc(sizeof(seed_t) + seed_len);
+  if (seed == NULL)
+    fatal("[-] malloc");
+  
+  ck_read(fd, seed->content, seed_len, seed_info->fname);
+
+  seed->flag = flag;
+  seed->size = sizeof(seed_t) + seed_len;
+
+  printf("[+] seed name: %s\n", seed_info->fname);
+  printf("[+] seed stage: %d\n", seed->flag);
+
+  pinfo = new_packet(GET_TASK, seed, seed->size);
+  if (pinfo == NULL) 
+    fatal("[-] new_packet");
+
+  ret = send_packet(cfd, pinfo);
+  if (ret < 0)
+    close(cfd);
+
+  free(pinfo);
+  free(seed);
+  close(fd);
+  return ret;
+
+}
+
+
+/* 处理节点同步位图的请求 */
+
+static int handle_sync_bitmap(int cfd, packet_info_t *pinfo) {
+
+  int ret = -1;
+  u8 *bitmap;
+  u64 *current, *virgin;
+  u32  i = (MAP_SIZE >> 3);
+  packet_info_t *resp;
+
+  bitmap = (u8*)packet_data(pinfo);
+
+  current = (u64*)bitmap;
+  virgin = (u64*)virgin_bits;
+
+  pthread_mutex_lock(&bitmap_mutex);
+
+  if(bitmap != NULL)
+    while (i--) *virgin &= *current;
+
+  resp = new_packet(SYNC_BITMAP, virgin_bits, MAP_SIZE);
+  if(resp == NULL)
+    fatal("[-] new_packet");
+  
+  pthread_mutex_unlock(&bitmap_mutex);
+
+  ret = send_packet(cfd, resp);
+  if(ret < 0)
+    close(cfd);
+
+  printf("[+] receive SYNC_BITMAP request\n");
+  return 0;
+
+}
+
+
+/* 执行节点的请求。从任务队列中获取请求事件并处理，若一段时间内
+   队列中无新事件，则退出线程 */
+
+static void* work_thread(void *arg) {
+
+  int cfd;
+  packet_info_t *pinfo;
+  request_task_t *task;
+
+  for(;;) {
+
+    if(stop_soon)
+      goto out;
+
+    task = (request_task_t*)pop_queue(request_queue);
+    if(task == NULL) {
+      /* 若等待超时 关闭该线程 */
+      goto out;
+    }
+    
+    cfd = task->fd;
+    pinfo = task->pinfo;
+
+    switch(pinfo->opcode) {
+
+      case PUT_SEED:
+        handle_put_seed(pinfo);
+        break;
+
+      case GET_TASK:
+        handle_get_task(cfd);
+        break;
+        
+      case SYNC_BITMAP:
+        handle_sync_bitmap(cfd, pinfo);
+        break;
+
+      default:
+        close(cfd);
+        break;
+
+    }
+
+    free(pinfo);
+    free(task);
+
+  }
+
+out:
+  pthread_mutex_lock(&thread_num_mutex);
+  --cur_thread_num;
+  pthread_mutex_unlock(&thread_num_mutex);
+  return NULL;
+
+}
+
+
+/* 接受节点的任务请求，并放入任务队列，同时维护工作线程数量 */
+
+static int handle_request(int client_fd) {
+
+  int ret = -1;
+  packet_info_t *pinfo;
+  request_task_t *task;
+
+  pinfo = recv_packet(client_fd);
+  if(pinfo == NULL) {
+    close(client_fd);
+    return ret;
+  }
+
+  task = (request_task_t*)malloc(sizeof(request_task_t));
+  if(task == NULL) {
+    perror("[-] malloc");
+    return 0;
+  }
+  
+  task->fd = client_fd;
+  task->pinfo = pinfo;
+
+  pthread_mutex_lock(&thread_num_mutex);
+  if(cur_thread_num < MAX_THEAD_COUNT) {
+    
+    pthread_t tid;
+    ret = pthread_create(&tid, NULL, work_thread, NULL);
+    if(ret < 0)
+      perror("[-] pthread_create");
+    else
+      ++cur_thread_num;
+
+    printf("[+] new work thread created\n");
+
+  }
+  pthread_mutex_unlock(&thread_num_mutex);
+
+  push_queue(request_queue, task);
+
+  return 0;
+
+}
+
+
+/* 初始化服务器，开启监听端口 */
+
+static int initialize_server() {
+
+  int listen_fd;
+
+  signal(SIGPIPE, SIG_IGN);
+
+  /* 初始化一个阻塞队列，设置超时时间为QUEUE_TIMEOUT */
+  request_queue = new_queue(/*nonblock:*/0, QUEUE_TIMEOUT);
+  if (request_queue == NULL)
+    fatal("[-] initialize_server");
+
+  cur_thread_num = 0;
+  pthread_mutex_init(&thread_num_mutex, NULL);
+  pthread_mutex_init(&seed_queue_mutex, NULL);
+  pthread_mutex_init(&bitmap_mutex, NULL);
+
+  listen_fd = get_tcp_server("127.0.0.1", 8888);
+  if (listen_fd < 0)
+    fatal("[-] get_tcp_server");
+
+  return listen_fd;
+}
+
+
+/* 启动监听循环 */
+
+static int start_server_loop(int listen_fd) {
+
+  int i, ret = -1;
+  int epoll_fd;
+  struct epoll_event event;
+  struct epoll_event *event_array;
+
+  event_array = (struct epoll_event*)
+                  malloc(sizeof(struct epoll_event) * MAX_EVENT_COUNT);
+  if(event_array == NULL)
+    fatal("[-] malloc");
+
+  epoll_fd = epoll_create(1);
+  if(epoll_fd < 0)
+    fatal("[-] epoll_create");
+
+  event.events = EPOLLIN;
+  event.data.fd = listen_fd;
+  ret = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, listen_fd, &event);
+  if(ret < 0)
+    fatal("[-] epoll_ctl");
+
+  for(;;) {
+    
+    int client_fd;
+    int ready_count;
+    
+    if(stop_soon)
+      break;
+
+    ready_count = epoll_wait(epoll_fd, event_array,
+                    MAX_EVENT_COUNT, -1);
+    if(ready_count < 0) {
+      if(errno == EINTR) 
+        continue;
+      fatal("[-] epoll_wait");
+    }
+
+    for(i = 0; i < ready_count; i++) {
+
+      if(event_array[i].data.fd == listen_fd) {
+        /* 监听到新连接 */
+        
+        client_fd = handle_new_client(listen_fd);
+        if(client_fd < 0) { 
+          perror("[-] handle_new_client");
+          continue;
+        }
+
+        event.events = EPOLLIN;
+        event.data.fd = client_fd;
+        ret = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &event);
+        if(ret < 0) {
+          perror("[-] epoll_ctl");
+          close(client_fd);
+          continue;
+        }
+
+      } else {
+        /* 处理客户端请求 */
+
+        client_fd = event_array[i].data.fd;
+        handle_request(client_fd);
+
+      }
+    }
+  }
+
+  return 0;
+
+}
+
 /* Take the current entry from the queue, fuzz it for a while. This
    function is a tad too long... returns 0 if fuzzed successfully, 1 if
    skipped or bailed out. */
@@ -5129,7 +5594,7 @@ static u8 fuzz_one(char** argv) {
      this entry ourselves (was_fuzzed), or if it has gone through deterministic
      testing in earlier, resumed runs (passed_det). */
 
-  if (skip_deterministic || queue_cur->was_fuzzed || queue_cur->passed_det)
+  if (skip_deterministic || queue_cur->was_fuzzed || !queue_cur->doing_det)
     goto havoc_stage;
 
   /* Skip deterministic fuzzing if exec path checksum puts this out of scope
@@ -6093,7 +6558,7 @@ skip_extras:
      we're properly done with deterministic steps and can mark it as such
      in the .state/ directory. */
 
-  if (!queue_cur->passed_det) mark_as_det_done(queue_cur);
+  if (queue_cur->doing_det) mark_as_det_done(queue_cur);
 
   /****************
    * RANDOM HAVOC *
@@ -7139,9 +7604,6 @@ EXP_ST void setup_dirs_fds(void) {
 
   ACTF("Setting up output directories...");
 
-  if (sync_id && mkdir(sync_dir, 0700) && errno != EEXIST)
-      PFATAL("Unable to create '%s'", sync_dir);
-
   if (mkdir(out_dir, 0700)) {
 
     if (errno != EEXIST) PFATAL("Unable to create '%s'", out_dir);
@@ -7758,9 +8220,8 @@ static void save_cmdline(u32 argc, char** argv) {
 
 int main(int argc, char** argv) {
 
-  s32 opt;
-  u64 prev_queued = 0;
-  u32 sync_interval_cnt = 0, seek_to;
+  s32 opt, server_fd;
+  u32 sync_interval_cnt = 0;
   u8  *extras_dir = 0;
   u8  mem_limit_given = 0;
   u8  exit_1 = !!getenv("AFL_BENCH_JUST_ONE");
@@ -7769,7 +8230,7 @@ int main(int argc, char** argv) {
   struct timeval tv;
   struct timezone tz;
 
-  SAYF(cCYA "afl-fuzz " cBRI VERSION cRST " by <lcamtuf@google.com>\n");
+  SAYF(cCYA "afl-server " cBRI VERSION cRST " by <hgy5945@gmail.com>\n");
 
   doc_path = access(DOC_PATH, F_OK) ? "docs" : DOC_PATH;
 
@@ -7955,7 +8416,7 @@ int main(int argc, char** argv) {
   setup_signal_handlers();
   check_asan_opts();
 
-  if (sync_id) fix_up_sync();
+  if(sync_id) fix_up_sync();
 
   if (!strcmp(in_dir, out_dir))
     FATAL("Input and output directories can't be the same");
@@ -8041,6 +8502,8 @@ int main(int argc, char** argv) {
 
   write_stats_file(0, 0, 0);
   save_auto();
+  
+  server_fd = initialize_server();
 
   if (stop_soon) goto stop_fuzzing;
 
@@ -8052,65 +8515,7 @@ int main(int argc, char** argv) {
     if (stop_soon) goto stop_fuzzing;
   }
 
-  while (1) {
-
-    u8 skipped_fuzz;
-
-    cull_queue();
-
-    if (!queue_cur) {
-
-      queue_cycle++;
-      current_entry     = 0;
-      cur_skipped_paths = 0;
-      queue_cur         = queue;
-
-      while (seek_to) {
-        current_entry++;
-        seek_to--;
-        queue_cur = queue_cur->next;
-      }
-
-      show_stats();
-
-      if (not_on_tty) {
-        ACTF("Entering queue cycle %llu.", queue_cycle);
-        fflush(stdout);
-      }
-
-      /* If we had a full queue cycle with no new finds, try
-         recombination strategies next. */
-
-      if (queued_paths == prev_queued) {
-
-        if (use_splicing) cycles_wo_finds++; else use_splicing = 1;
-
-      } else cycles_wo_finds = 0;
-
-      prev_queued = queued_paths;
-
-      if (sync_id && queue_cycle == 1 && getenv("AFL_IMPORT_FIRST"))
-        sync_fuzzers(use_argv);
-
-    }
-
-    skipped_fuzz = fuzz_one(use_argv);
-
-    if (!stop_soon && sync_id && !skipped_fuzz) {
-      
-      if (!(sync_interval_cnt++ % SYNC_INTERVAL))
-        sync_fuzzers(use_argv);
-
-    }
-
-    if (!stop_soon && exit_1) stop_soon = 2;
-
-    if (stop_soon) break;
-
-    queue_cur = queue_cur->next;
-    current_entry++;
-
-  }
+  start_server_loop(server_fd);
 
   if (queue_cur) show_stats();
 
@@ -8143,6 +8548,10 @@ stop_fuzzing:
            "    (For info on resuming, see %s/README.)\n", doc_path);
 
   }
+
+  close(server_fd);
+  delete_queue(request_queue);
+  request_queue = NULL;
 
   fclose(plot_file);
   destroy_queue();

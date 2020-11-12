@@ -136,7 +136,6 @@ void delete_queue(queue_t *que) {
   
   queue_item_t *item, *next_item;
 
-  pthread_mutex_lock(&que->pop_mutex);
   pthread_mutex_lock(&que->push_mutex);
 
   item = que->head;

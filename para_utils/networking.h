@@ -9,15 +9,36 @@
 
 /* COMMAND in packet */
 #define PUT_SEED    0   /* 上传新种子 */
-#define GET_TASK    1   /* 请求下载种子 */
+#define GET_TASK    1   /* 请求fuzz任务 */
 #define SYNC_BITMAP 2   /* 请求同步位图 */
+#define SYNC_EXTRAS 3   /* 同步extras */
+#define INIT_INFO   4   /* 初始化fuzz节点 */
+
+/* 策略选择 */
+#define M_BITFLIP   5
+#define M_ARITH     4
+#define M_INTEREST  3
+#define M_EXTRAS    2
+#define M_HAVOC     1
+#define M_SPLICE    0
+
+
+typedef struct seed {
+
+  size_t size;        /* 总长度 */
+  
+  uint8_t flag;       /* seed状态 或 策略选择 */ 
+
+  uint8_t content[0];
+
+} seed_t;
 
 
 typedef struct packet_info {
 
   uint32_t size;      // 总长度
-  uint32_t opcode;    // 操作码
-  char data[0]; 
+  uint32_t opcode;     // 操作码
+  uint8_t data[0]; 
 
 } packet_info_t;
 
