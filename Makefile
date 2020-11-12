@@ -24,13 +24,13 @@ MISC_PATH   = $(PREFIX)/share/afl
 
 # PROGS intentionally omit afl-as, which gets installed elsewhere.
 
-PROGS       = afl-gcc afl-fuzz afl-showmap afl-tmin afl-gotcpu afl-analyze
+PROGS       = afl-gcc afl-fuzz afl-showmap afl-tmin afl-gotcpu afl-analyze afl-server
 SH_PROGS    = afl-plot afl-cmin afl-whatsup
 
-CFLAGS     ?= -O3 -funroll-loops
+CFLAGS     ?= -funroll-loops
 CFLAGS     += -Wall -D_FORTIFY_SOURCE=2 -g -Wno-pointer-sign \
 	      -DAFL_PATH=\"$(HELPER_PATH)\" -DDOC_PATH=\"$(DOC_PATH)\" \
-	      -DBIN_PATH=\"$(BIN_PATH)\"
+	      -DBIN_PATH=\"$(BIN_PATH)\" 
 
 ifneq "$(filter Linux GNU%,$(shell uname))" ""
   LDFLAGS  += -ldl
@@ -43,6 +43,9 @@ else
 endif
 
 COMM_HDR    = alloc-inl.h config.h debug.h types.h
+UTILS				= para_utils/networking.c para_utils/networking.h \
+							para_utils/work_queue.c para_utils/work_queue.h
+UTILS_OBJ		= networking.o work_queue.o
 
 all: test_x86 $(PROGS) afl-as test_build all_done
 
@@ -69,8 +72,8 @@ afl-as: afl-as.c afl-as.h $(COMM_HDR) | test_x86
 	$(CC) $(CFLAGS) $@.c -o $@ $(LDFLAGS)
 	ln -sf afl-as as
 
-afl-fuzz: afl-fuzz.c $(COMM_HDR) | test_x86
-	$(CC) $(CFLAGS) $@.c -o $@ $(LDFLAGS)
+afl-fuzz: afl-fuzz.o $(UTILS_OBJ) | test_x86
+	$(CC) $(CFLAGS) $@.o $(UTILS_OBJ) -o $@ $(LDFLAGS) -pthread
 
 afl-showmap: afl-showmap.c $(COMM_HDR) | test_x86
 	$(CC) $(CFLAGS) $@.c -o $@ $(LDFLAGS)
@@ -83,6 +86,18 @@ afl-analyze: afl-analyze.c $(COMM_HDR) | test_x86
 
 afl-gotcpu: afl-gotcpu.c $(COMM_HDR) | test_x86
 	$(CC) $(CFLAGS) $@.c -o $@ $(LDFLAGS)
+
+afl-server: afl-server.o $(UTILS_OBJ) | test_x86
+	$(CC) $(CFLAGS) $@.o $(UTILS_OBJ) -o $@ $(LDFLAGS) -pthread
+
+networking.o: para_utils/networking.c para_utils/networking.h
+	$(CC) $(CFLAGS) -c para_utils/networking.c -o $@ $(LDFLAGS)
+
+work_queue.o: para_utils/work_queue.c para_utils/work_queue.h
+	$(CC) $(CFLAGS) -c para_utils/work_queue.c -o $@ $(LDFLAGS)
+
+afl-fuzz.o: afl-fuzz.c $(COMM_HDR)
+	$(CC) $(CFLAGS) -c $< -o $@ $(LDFLAGS)
 
 ifndef AFL_NO_X86
 
