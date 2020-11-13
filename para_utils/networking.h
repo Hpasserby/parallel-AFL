@@ -23,21 +23,19 @@
 #define M_SPLICE    0
 
 
-typedef struct seed {
+typedef struct seed_info {
 
-  size_t size;        /* 总长度 */
-  
-  uint8_t flag;       /* seed状态 或 策略选择 */ 
-
+  uint32_t size;            /* 总长度 */
+  uint32_t flag;            /* 策略选择 仅下发任务有效 */ 
   uint8_t content[0];
 
-} seed_t;
+} seed_info_t;
 
 
 typedef struct packet_info {
 
-  uint32_t size;      // 总长度
-  uint32_t opcode;     // 操作码
+  uint32_t size;            /* 总长度 */
+  uint32_t opcode;          /* 操作码 */
   uint8_t data[0]; 
 
 } packet_info_t;
