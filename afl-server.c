@@ -4492,10 +4492,35 @@ static int handle_new_client(int listen_fd) {
 }
 
 
-static struct queue_entry* next_seed_info(u8 *stage) {
+static struct queue_entry* next_seed_info(u8 *stage, u8 random_seed) {
 
   struct queue_entry* seed_entry = NULL;
   
+  if(random_seed) {
+
+    u32 tid;
+
+retry_random:
+
+    tid = UR(queued_paths);
+
+    seed_entry = queue;
+
+    while (tid >= 100) { seed_entry = seed_entry->next_100; tid -= 100; }
+    while (tid--) seed_entry = seed_entry->next;
+
+    while (seed_entry && seed_entry->len < 2) {
+      seed_entry = seed_entry->next;
+    }
+
+    if(!seed_entry)
+      goto retry_random;
+
+    *stage = M_SPLICE;
+    return seed_entry;
+
+  }
+
   /* 艹 太多全局变量了 */
   pthread_mutex_lock(&seed_queue_mutex);
 
@@ -4540,7 +4565,7 @@ static struct queue_entry* next_seed_info(u8 *stage) {
     if (seed_entry->was_fuzzed) {
 
       /* 判断是否需要splice */
-      if (use_splicing)
+      if (use_splicing && queued_paths > 1)
         *stage = M_SPLICE;
 
       goto next;
@@ -4623,7 +4648,7 @@ static int handle_put_seed(char** argv, packet_info_t *pinfo) {
   if(seed_info == NULL)
     return -1;
   
-  seed_len = seed_info->size - sizeof(seed_info); 
+  seed_len = seed_info->seed_len; 
   if(seed_len <= 0)
     return -1;
 
@@ -4649,48 +4674,100 @@ static int handle_put_seed(char** argv, packet_info_t *pinfo) {
 
 /* 处理节点获取任务的请求 */
 
-static int handle_get_task(int cfd) {
+static int handle_get_task(int cfd, packet_info_t *pinfo) {
 
-  int fd, ret = -1;
-  uint8_t flag;
-  uint32_t seed_len;
+  int ret = -1;
+  uint32_t seed_size;
+  uint8_t flag, *fname, random_seed = 0;
   seed_info_t *seed;
   struct queue_entry *seed_entry;
-  packet_info_t *pinfo;
+  packet_info_t *resp;
 
-  seed_entry = next_seed_info(&flag);
+  /* 约定 如果有消息体则请求随机种子 否则请求顺序下一个 */
+  if (packet_data(pinfo))
+    seed_entry = next_seed_info(&flag, 1);
+  else
+    seed_entry = next_seed_info(&flag, 0);
+  
+  fname = seed_entry->fname;
+  seed_size = sizeof(seed_info_t) + strlen(fname) + 1;
 
-  fd = open(seed_entry->fname, O_RDONLY);
-  if (fd < 0)
-    PFATAL("[-] Unable to open '%s'", seed_entry->fname);
-
-  seed_len = seed_entry->len;
-
-  seed = (seed_info_t*)malloc(sizeof(seed_info_t) + seed_len);
+  seed = (seed_info_t*)malloc(seed_size);
   if (seed == NULL)
     fatal("[-] malloc");
   
-  ck_read(fd, seed->content, seed_len, seed_entry->fname);
-
   seed->flag = flag;
-  seed->size = sizeof(seed_info_t) + seed_len;
+  seed->seed_len = seed_entry->len;
+  seed->size = seed_size;
+  strcpy(seed->content, fname);
 
-  printf("[+] seed name: %s\n", seed_entry->fname);
+  printf("[+] seed name: %s\n", fname);
   printf("[+] seed stage: %d\n", seed->flag);
 
-  pinfo = new_packet(GET_TASK, seed, seed->size);
-  if (pinfo == NULL) 
+  resp = new_packet(GET_TASK, seed, seed->size);
+  if (resp == NULL) 
     fatal("[-] new_packet");
 
-  ret = send_packet(cfd, pinfo);
+  ret = send_packet(cfd, resp);
   if (ret < 0)
     close(cfd);
 
-  free(pinfo);
+  free(resp);
   free(seed);
-  close(fd);
   return ret;
 
+}
+
+
+static int handle_get_seed(int cfd, packet_info_t *pinfo) {
+
+  int fd, ret = -1;
+  u8* fname;
+  uint32_t seed_len;
+  seed_info_t *seed, *new_seed;
+  packet_info_t *resp;
+
+  seed = (seed_info_t*)packet_data(pinfo);
+  if (seed == NULL || seed->size <= sizeof(seed_info_t))
+    goto do_resp;
+
+  fname = (u8*)seed->content;
+  seed_len = seed->seed_len;
+
+  new_seed = (seed_info_t*)malloc(sizeof(seed_info_t) + seed_len);
+  if (new_seed == NULL)
+    fatal("[-] malloc");
+
+  new_seed->size = sizeof(seed_info_t) + seed_len;
+  new_seed->flag = seed->flag;
+  new_seed->seed_len = seed_len;
+
+  fd = open(fname, O_RDONLY);
+  if (fd < 0)
+    PFATAL("[-] Unable to open '%s'", fname);
+
+  ck_read(fd, new_seed->content, seed_len, fname);
+
+  ret = 0;
+
+do_resp:
+  if (ret < 0)
+    resp = new_packet(GET_SEED, NULL, 0);
+  else
+    resp = new_packet(GET_SEED, new_seed, new_seed->size);
+
+  if (resp == NULL)
+    fatal("[-] new_packet");
+
+  ret = send_packet(cfd, resp);
+  if(ret < 0)
+    close(cfd);
+  
+  free(resp);
+  free(new_seed);
+  close(fd);
+
+  return ret;
 }
 
 
@@ -4761,9 +4838,13 @@ static void* work_thread(void *arg) {
         break;
 
       case GET_TASK:
-        handle_get_task(cfd);
+        handle_get_task(cfd, pinfo);
         break;
         
+      case GET_SEED:
+        handle_get_seed(cfd, pinfo);
+        break;
+
       case SYNC_BITMAP:
         handle_sync_bitmap(cfd, pinfo);
         break;
