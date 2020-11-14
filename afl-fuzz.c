@@ -315,7 +315,6 @@ static seed_cache_entry_t seed_cache[CACHE_MAX];
 
 /* fuzz任务队列 */
 static queue_t *task_queue;
-static pthread_mutex_t *get_task_mutex;
 
 /* Fuzzing stages */
 
@@ -357,6 +356,14 @@ enum {
   /* 04 */ FAULT_NOINST,
   /* 05 */ FAULT_NOBITS
 };
+
+
+/* 严重错误处理函数 */
+
+static void fatal(const char *s) {
+  perror(s);
+  exit(1);
+}
 
 
 /* Get unix time in milliseconds */
@@ -904,6 +911,42 @@ EXP_ST void read_bitmap(u8* fname) {
 }
 
 
+static s32 sync_bitmap() {
+
+  int ret;
+  u8 *bitmap; 
+  packet_info_t *pinfo;
+
+  pinfo = new_packet(SYNC_BITMAP, virgin_bits, MAP_SIZE);
+  if(pinfo == NULL) fatal("[-] new_packet");
+
+  ret = send_packet(sock_fd, pinfo);
+  if(ret < 0) goto sock_err;
+
+  free(pinfo);
+
+  pinfo = recv_packet(sock_fd);
+  if(pinfo == NULL || pinfo->opcode != SYNC_BITMAP)
+    goto sock_err;
+
+  bitmap = packet_data(pinfo);
+  if(bitmap != NULL) {
+    memcpy(virgin_bits, bitmap, MAP_SIZE);
+  }
+
+  free(pinfo);
+  return 0;
+
+sock_err:
+  
+  free(pinfo);
+  fprintf(stderr, "[-] sync_bitmap: socket error");
+  stop_soon = 1;
+  return -1;
+
+}
+
+
 /* Check if the current execution path brings anything new to the table.
    Update virgin bits to reflect the finds. Returns 1 if the only change is
    the hit-count for a particular tuple; 2 if there are new tuples seen. 
@@ -913,6 +956,8 @@ EXP_ST void read_bitmap(u8* fname) {
    it needs to be fast. We do this in 32-bit and 64-bit flavors. */
 
 static inline u8 has_new_bits(u8* virgin_map) {
+
+  u8 done_sync = 0;
 
 #ifdef WORD_SIZE_64
 
@@ -934,11 +979,20 @@ static inline u8 has_new_bits(u8* virgin_map) {
 
   while (i--) {
 
+recheck:
     /* Optimize for (*current & *virgin) == 0 - i.e., no bits in current bitmap
        that have not been already cleared from the virgin map - since this will
        almost always be the case. */
 
     if (unlikely(*current) && unlikely(*current & *virgin)) {
+
+      if(!done_sync) {
+
+        sync_bitmap();
+        done_sync = 1;
+        goto recheck;
+
+      }
 
       if (likely(ret < 2)) {
 
@@ -3164,7 +3218,7 @@ static void write_crash_readme(void) {
 }
 
 
-static u8 upload_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
+static u8 upload_if_interesting(void* mem, u32 len, u8 fault) {
 
   s32 ret;
   u8  hnb;
@@ -3209,7 +3263,7 @@ static u8 upload_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
   if(pinfo == NULL)
     fatal("[-] new_packet");
 
-  ret = send_packet(pinfo);
+  ret = send_packet(sock_fd, pinfo);
   if(ret < 0) { 
     fprintf(stderr, "[-] upload_if_interesting: socket error\n");
     stop_soon = 1;
@@ -5061,6 +5115,237 @@ static u8 could_be_interest(u32 old_val, u32 new_val, u8 blen, u8 check_le) {
 }
 
 
+static int initialize_client() {
+
+  sock_fd = get_tcp_client("127.0.0.1", 8888);
+  if (sock_fd < 0)
+    fatal("[-] get_tcp_client");
+
+  task_queue = new_queue(/*nonblock*/0, 0);
+  if(task_queue == NULL)
+    fatal("[-] new_queue");
+
+  memset(seed_cache, 0, sizeof(seed_cache));
+
+  return 0;
+}
+
+
+/* 搜索本地是否缓存种子 */
+
+static struct queue_entry* search_cache(s32 id) {
+
+  int off, index;
+
+  index = id % CACHE_MAX;
+
+  for (off = 0; off < CACHE_MAX; off++) {
+
+    if (seed_cache[index].seed_id == id)
+      return seed_cache[index].seed_info;
+    index++;
+
+  }
+
+  return NULL;
+
+}
+
+/* 添加缓存信息 */
+
+static void add_cache(s32 id, struct queue_entry* seed_info) {
+
+  int off, index;
+  u8 *fn;
+
+  index = id % CACHE_MAX;
+  
+  for (off = 0; off < CACHE_MAX; off++) {
+
+    if (seed_cache[index].seed_info == NULL)
+      break;
+    index++;
+
+  }
+  
+  if (off == CACHE_MAX) {
+    
+    struct queue_entry *tmp;
+
+    tmp = seed_cache[index].seed_info;
+
+    fn = tmp->fname;
+    if (fn) {
+      unlink(fn); 
+      free(fn);
+    }
+    if(!--tmp->tc_ref)
+      ck_free(tmp->trace_mini); 
+
+    free(tmp);
+
+  }
+
+  seed_cache[index].seed_id = id;
+  seed_cache[index].seed_info = seed_info;
+
+}
+
+
+/* 根据文件名获取seed的id */
+
+static s32 get_seed_id(u8 *fn) {
+
+  s32 id;
+  char *start, *end;
+  
+  start = strstr(fn, "id:");
+  if(start == NULL)
+    return -1;
+  start += 3;
+  
+  end = strstr(start, ",");
+  if(end == NULL)
+    return -1;
+
+  if(end - start != 6)
+    return -1;
+
+  id = atoi(start);
+
+  return id;
+}
+
+
+static struct queue_entry* save_seed(char** argv, void *mem, u32 len, uint32_t id) {
+  
+  u8 res;
+  u8* fn = "";
+  s32 fd;
+  struct queue_entry *seed_entry;
+
+  fn = alloc_printf("%s/cache/id_%06u", out_dir, queued_paths);
+  
+  seed_entry = ck_alloc(sizeof(struct queue_entry));
+
+  seed_entry->fname          = fn;
+  seed_entry->len            = len;
+  seed_entry->depth          = cur_depth + 1;
+  seed_entry->passed_det     = 0;
+  seed_entry->exec_cksum     = 0;
+  
+  if (seed_entry->depth > max_depth) max_depth = seed_entry->depth;
+
+  queued_paths++;
+  cycles_wo_finds = 0;
+
+  res = calibrate_case(argv, seed_entry, mem, 0, 0);
+  if (res == FAULT_ERROR)
+    goto out_err;
+  
+  fd = open(fn, O_WRONLY | O_CREAT | O_EXCL, 0600);
+  if (fd < 0) PFATAL("Unable to create '%s'", fn);
+  ck_write(fd, mem, len, fn);
+  close(fd);
+  
+  add_cache(id, seed_entry);
+
+  return seed_entry;
+
+out_err:
+  free(fn);
+  free(seed_entry);
+  return NULL;
+
+}
+
+
+/* 向服务器获取fuzz任务
+ *    fd              - 网络套接字描述符
+ *    mutation_type   - 变异策略 若输入为M_SPLICE则请求随机种子
+ */
+
+static struct queue_entry* request_seed(char** argv, u8* mutation_type, u8 random) {
+
+  int ret, seed_id, need_cache = 1;
+  packet_info_t *task_pinfo, *seed_pinfo;
+  seed_info_t *seed;
+  struct queue_entry* seed_entry = NULL;
+
+  /* 约定 如果有消息体则请求随机种子 否则请求顺序下一个 */
+  if (random)
+    task_pinfo = new_packet(GET_TASK, NULL, 1);
+  else
+    task_pinfo = new_packet(GET_TASK, NULL, 0);
+  if (task_pinfo == NULL) fatal("new_packet");
+
+  ret = send_packet(sock_fd, task_pinfo);
+  if (ret < 0) goto sock_err;
+
+  free(task_pinfo);
+
+  task_pinfo = recv_packet(sock_fd);
+  if (task_pinfo == NULL) goto sock_err;
+
+  seed = (seed_info_t*)packet_data(task_pinfo);
+  if (seed == NULL) goto out;
+
+  seed_id = get_seed_id(seed->content);
+  
+  seed_entry = search_cache(seed_id);
+  if (seed_entry) 
+    need_cache = 0;
+  
+  if (need_cache) {
+
+    u8 fault;
+
+    seed_pinfo = new_packet(GET_SEED, seed, seed->size);
+    if(seed_pinfo == NULL) fatal("new_packet");
+
+    ret = send_packet(sock_fd, seed_pinfo);
+    if(ret < 0) goto sock_err;
+
+    free(seed_pinfo);
+    
+    seed_pinfo = recv_packet(sock_fd);
+    if(seed_pinfo == NULL) goto sock_err;
+
+    seed = (seed_info_t*)packet_data(seed_pinfo);
+    if(seed == NULL) goto out;
+
+    write_to_testcase(seed->content, seed->seed_len);
+    fault = run_target(argv, exec_tmout);
+
+    seed_entry = save_seed(argv, seed->content, seed->seed_len, seed_id);
+    if(seed_entry == NULL) goto out;
+    
+    queued_paths++;
+
+  }
+  
+  *mutation_type = seed->flag;
+
+  if(!random)
+    current_entry = seed_id;
+  else if(random && current_entry == seed_id)
+    seed_entry = NULL;
+  
+out:
+
+  free(task_pinfo);
+  free(seed_pinfo);
+  return seed_entry;
+
+sock_err:
+
+  fprintf(stderr, "[-] get_task: socket error\n");
+  stop_soon = 1;
+  return NULL;
+
+}
+
+
 /* bit flip mutation. returns 0 if successfully, 1 if bailed out
  * 
  * len      - length of the case
@@ -5321,7 +5606,6 @@ static u8 mutation_bit_flip(char** argv, s32 len, u8* out_buf){
 
   return 0;
 
-#undef FLIP_BIT
 }
 
 
@@ -6415,7 +6699,7 @@ retry_splicing:
   if (use_splicing && splice_cycle++ < SPLICE_CYCLES) {
 
     struct queue_entry* target;
-    u32 tid, split_at;
+    u32 split_at;
     u8 mutation_type;
     u8* new_buf;
     s32 f_diff, l_diff;
@@ -6433,9 +6717,9 @@ retry_splicing:
 
     for(i = 0; i < 16; i++) {
       
-      target = request_seed(sock_fd, &mutation_type, 1);
+      target = request_seed(argv, &mutation_type, 1);
       if(target && target->len >= 2)
-        break
+        break;
 
     }
     
@@ -6485,6 +6769,7 @@ retry_splicing:
 #endif /* !IGNORE_FINDS */
 
 }
+#undef FLIP_BIT
 
 
 /* Take the current entry from the queue, fuzz it for a while. This
@@ -6583,31 +6868,33 @@ static u8 fuzz_one(char** argv, u8 mutation_type) {
 
   memcpy(out_buf, in_buf, len);
 
-  switch(mutation_type)
+  switch(mutation_type) {
   
-  case M_BITFLIP:
-    mutation_bit_flip(argv, len, out_buf);
-    break;
+    case M_BITFLIP:
+      mutation_bit_flip(argv, len, out_buf);
+      break;
 
-  case M_ARITH:
-    mutation_arith(argv, len, out_buf);
-    break;
+    case M_ARITH:
+      mutation_arith(argv, len, out_buf);
+      break;
 
-  case M_INTEREST:
-    mutation_interest(argv, len, out_buf);
-    break;
+    case M_INTEREST:
+      mutation_interest(argv, len, out_buf);
+      break;
 
-  case M_EXTRAS:
-    extras_dictionary(argv, len, out_buf, in_buf)
-    break
+    case M_EXTRAS:
+      mutation_extras(argv, len, out_buf, in_buf);
+      break;
 
-  case M_HAVOC:
-    mutation_havoc_splicing(argv, len, &out_buf, &in_buf);
-    break;
+    case M_HAVOC:
+      mutation_havoc_splicing(argv, len, &out_buf, &in_buf);
+      break;
 
-  case M_SPLICE:
-    use_splicing = 1;
-    mutation_havoc_splicing(argv, len, &out_buf, &in_buf);
+    case M_SPLICE:
+      use_splicing = 1;
+      mutation_havoc_splicing(argv, len, &out_buf, &in_buf);
+      use_splicing = 0;
+  }
 
   ret_val = 0;
 
@@ -6623,240 +6910,6 @@ abandon_entry:
 
   return ret_val;
 
-
-}
-
-
-static int initialize_client() {
-
-  sock_fd = get_tcp_client("127.0.0.1", 8888);
-  if (sock_fd < 0)
-    fatal("[-] get_tcp_client");
-
-  task_queue = new_queue(/*nonblock*/0, 0);
-  if(task_queue == NULL)
-    fatal("[-] new_queue");
-
-  memset(seed_cache, 0 sizeof(seed_cache));
-
-  pthread_mutex_init(&get_task_mutex, NULL);
-
-  return 0;
-}
-
-
-/* 搜索本地是否缓存种子 */
-
-static struct queue_entry* search_cache(s32 id) {
-
-  int off, index;
-
-  index = id % CACHE_MAX;
-
-  for (off = 0; off < CACHE_MAX; off++) {
-
-    if (seed_cache[index].seed_id == id)
-      return seed_cache[index].seed_info;
-    index++;
-
-  }
-
-  return NULL;
-
-}
-
-/* 添加缓存信息 */
-
-static void add_cache(s32 id, struct queue_entry* seed_info) {
-
-  int off, index;
-  u8 *fn;
-
-  index = id % CACHE_MAX;
-  
-  for (off = 0; off < CACHE_MAX; off++) {
-
-    if (seed_cache[index].seed_info == NULL)
-      break;
-    index++;
-
-  }
-  
-  if (off == CACHE_MAX) {
-    
-    struct queue_entry *tmp;
-
-    tmp = seed_cache[index].seed_info;
-
-    fn = tmp->fname;
-    if (fn) {
-      unlink(fn); 
-      free(fn);
-    }
-    if(!--tmp->tc_ref)
-      ck_free(tmp->trace_mini); 
-
-    free(tmp);
-
-  }
-
-  seed_cache[index].id = id;
-  seed_cache[index].seed_info = seed_info;
-
-}
-
-
-/* 根据文件名获取seed的id */
-
-static s32 get_seed_id(u8 *fn) {
-
-  s32 id;
-  char *start, *end;
-  
-  start = strstr(fn, "id:");
-  if(start == NULL)
-    return -1;
-  start += 3;
-  
-  end = strstr(start, ",");
-  if(end == NULL)
-    return -1;
-
-  if(end - start != 6)
-    return -1;
-
-  id = atoi(start);
-
-  return id;
-}
-
-
-static queue_entry* save_seed(char** argv, void *mem, u32 len, uint32_t id) {
-  
-  u8 res;
-  u8* fn = "";
-  s32 fd;
-  struct queue_entry *seed_entry;
-
-  fn = alloc_printf("%s/cache/id_%06u", out_dir, queued_paths);
-  
-  seed_entry = ck_alloc(sizeof(struct queue_entry));
-
-  q->fname          = fn;
-  q->len            = len;
-  q->depth          = cur_depth + 1;
-  q->passed_det     = 0;
-  q->exec_cksum     = 0;
-  
-  if (q->depth > max_depth) max_depth = q->depth;
-
-  queue_paths++;
-  cycles_wo_finds = 0;
-
-  res = calibrate_case(argv, seed_entry, mem, 0, 0);
-  if (res == FAULT_ERROR)
-    goto out_err;
-  
-  fd = open(fn, O_WRONLY | O_CREAT | O_EXCL, 0600);
-  if (fd < 0) PFATAL("Unable to create '%s'", fn);
-  ck_write(fd, mem, len, fn);
-  close(fd);
-  
-  add_cache(id, seed_entry);
-
-  return seed_entry;
-
-out_err:
-  free(fn);
-  free(seed_entry);
-  return NULL;
-
-}
-
-
-/* 向服务器获取fuzz任务
- *    fd              - 网络套接字描述符
- *    mutation_type   - 变异策略 若输入为M_SPLICE则请求随机种子
- */
-
-static queue_entry* request_seed(int fd, u8* mutation_type, u8 random) {
-
-  int ret = NULL, seed_id, need_cache = 1;
-  packet_info_t *task_pinfo, *seed_pinfo;
-  seed_info_t *seed;
-  struct queue_entry* seed_entry = NULL;
-
-  /* 约定 如果有消息体则请求随机种子 否则请求顺序下一个 */
-  if (random)
-    task_pinfo = new_packet(GET_TASK, NULL, 1);
-  else
-    task_pinfo = new_packet(GET_TASK, NULL, 0);
-  if (task_pinfo == NULL) fatal("new_packet");
-
-  ret = send_packet(fd, task_pinfo);
-  if (ret < 0) goto sock_err;
-
-  free(task_pinfo);
-
-  task_pinfo = recv_packet(fd);
-  if (task_pinfo == NULL) goto sock_err;
-
-  seed = (seed_info_t*)packet_data(task_pinfo);
-  if (seed == NULL) goto out;
-
-  seed_id = get_seed_id(seed->content);
-  
-  seed_entry = search_cache(seed_id);
-  if (seed_entry) 
-    need_cache = 0;
-  
-  if (need_cache) {
-
-    u8 fault;
-    u8 *mem;
-
-    seed_pinfo = new_packet(GET_SEED, seed, seed->size);
-    if(seed_pinfo == NULL) fatal("new_packet");
-
-    ret = send_packet(seed_pinfo);
-    if(ret < 0) goto sock_err;
-
-    free(seed_pinfo);
-    
-    seed_pinfo = recv_packet(fd);
-    if(seed_pinfo == NULL) goto sock_err;
-
-    seed = (seed_info_t*)packet_data(seed_pinfo);
-    if(seed == NULL) goto out;
-
-    write_to_testcase(seed->content, seed->seed_len);
-    fault = run_target(argv, exec_tmout);
-
-    seed_entry = save_seed(argv, seed->content, seed->seed_len);
-    if(seed_entry == NULL) goto out;
-    
-    queued_paths++;
-
-  }
-  
-  *mutation_type = seed->flag;
-
-  if(!random)
-    current_entry = seed_id;
-  else if(random && current_entry == seed_id)
-    seed_entry == NULL;
-  
-out:
-
-  free(task_pinfo);
-  free(seed_pinfo);
-  return seed_entry;
-
-sock_err:
-
-  fprintf(stderr, "[-] get_task: socket error\n");
-  stop_soon = 1;
-  return NULL;
 
 }
 
@@ -7952,8 +8005,6 @@ static void save_cmdline(u32 argc, char** argv) {
 int main(int argc, char** argv) {
 
   s32 opt;
-  u64 prev_queued = 0;
-  u32 sync_interval_cnt = 0, seek_to;
   u8  *extras_dir = 0;
   u8  mem_limit_given = 0;
   u8  exit_1 = !!getenv("AFL_BENCH_JUST_ONE");
@@ -8230,10 +8281,10 @@ int main(int argc, char** argv) {
 
   show_init_stats();
 
-  seek_to = find_start_position();
-
   write_stats_file(0, 0, 0);
   save_auto();
+
+  initialize_client();
 
   if (stop_soon) goto stop_fuzzing;
 
@@ -8250,8 +8301,8 @@ int main(int argc, char** argv) {
     u8 mutation_type;
 
     do {
-      queue_cur = request_seed(sock_fd, &mutation_type, 0);
-    } while(!queue_entry && !stop_soon)
+      queue_cur = request_seed(argv, &mutation_type, 0);
+    } while(!queue_cur && !stop_soon);
     
     if (stop_soon) break;
 
