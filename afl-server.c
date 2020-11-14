@@ -4678,7 +4678,7 @@ static int handle_get_task(int cfd, packet_info_t *pinfo) {
 
   int ret = -1;
   uint32_t seed_size;
-  uint8_t flag, *fname, random_seed = 0;
+  uint8_t flag, *fname;
   seed_info_t *seed;
   struct queue_entry *seed_entry;
   packet_info_t *resp;
