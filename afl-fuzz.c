@@ -3164,6 +3164,64 @@ static void write_crash_readme(void) {
 }
 
 
+static u8 upload_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
+
+  s32 ret;
+  u8  hnb;
+  packet_info_t *pinfo;
+  seed_info_t *seed_info;
+
+  if (fault == crash_mode) {
+
+    if (!(hnb = has_new_bits(virgin_bits))) {
+      if (crash_mode) total_crashes++;
+      return 0;
+    }
+
+  }
+
+  switch (fault) {
+
+    case FAULT_TMOUT:
+      break;
+
+    case FAULT_CRASH:
+      break;
+
+    case FAULT_ERROR:
+      FATAL("Unable to execute target application");
+    
+    default:
+      return 0; 
+
+  }
+
+  seed_info = (seed_info_t*)malloc(sizeof(seed_info_t) + len);
+  if(seed_info == NULL)
+    fatal("[-] malloc");
+
+  seed_info->size = sizeof(seed_info_t) + len;
+  seed_info->flag = 0;
+  seed_info->seed_len = len;
+  memcpy(seed_info->content, mem, len);
+
+  pinfo = new_packet(PUT_SEED, seed_info, seed_info->size);
+  if(pinfo == NULL)
+    fatal("[-] new_packet");
+
+  ret = send_packet(pinfo);
+  if(ret < 0) { 
+    fprintf(stderr, "[-] upload_if_interesting: socket error\n");
+    stop_soon = 1;
+  }
+
+  free(pinfo);
+  free(seed_info);
+  return !!ret;
+
+}
+
+
 /* Check if the result of an execve() during routine fuzzing is interesting,
    save or queue the input test case for further analysis if so. Returns 1 if
    entry is saved, 0 otherwise. */
@@ -4164,9 +4222,8 @@ static void show_stats(void) {
      together, but then cram them into a fixed-width field - so we need to
      put them in a temporary buffer first. */
 
-  sprintf(tmp, "%s%s (%0.02f%%)", DI(current_entry),
-          queue_cur->favored ? "" : "*",
-          ((double)current_entry * 100) / queued_paths);
+  sprintf(tmp, "%s%s", DI(current_entry),
+          queue_cur->favored ? "" : "*");
 
   SAYF(bV bSTOP "  now processing : " cRST "%-17s " bSTG bV bSTOP, tmp);
 
@@ -4694,7 +4751,7 @@ EXP_ST u8 common_fuzz_stuff(char** argv, u8* out_buf, u32 len) {
 
   /* This handles FAULT_ERROR for us: */
 
-  queued_discovered += save_if_interesting(argv, out_buf, len, fault);
+  queued_discovered += upload_if_interesting(out_buf, len, fault);
 
   if (!(stage_cur % stats_update_freq) || stage_cur + 1 == stage_max)
     show_stats();
@@ -5263,6 +5320,8 @@ static u8 mutation_bit_flip(char** argv, s32 len, u8* out_buf){
   stage_cycles[STAGE_FLIP32] += stage_max;
 
   return 0;
+
+#undef FLIP_BIT
 }
 
 
@@ -5699,7 +5758,7 @@ static u8 mutation_interest(char** argv, s32 len, u8* out_buf){
  * in_buf   - origin content of the case
  */
 
-static u8 mutation_dictionary(char** argv, s32 len, u8* out_buf, u8* in_buf){
+static u8 mutation_extras(char** argv, s32 len, u8* out_buf, u8* in_buf){
 
   s32 i, j;
   u8 *ex_tmp;
@@ -5895,7 +5954,8 @@ havoc_stage:
 
     stage_name  = "havoc";
     stage_short = "havoc";
-    stage_max   = HAVOC_CYCLES * perf_score / havoc_div / 100;
+    stage_max   = (use_splicing ? HAVOC_CYCLES : HAVOC_CYCLES_INIT) * 
+                  perf_score / havoc_div / 100;
 
   } else {
 
@@ -5906,7 +5966,8 @@ havoc_stage:
     sprintf(tmp, "splice %u", splice_cycle);
     stage_name  = tmp;
     stage_short = "splice";
-    stage_max   = SPLICE_HAVOC * perf_score / havoc_div / 100;
+    stage_max   = (use_splicing ? HAVOC_CYCLES : HAVOC_CYCLES_INIT) * 
+                  perf_score / havoc_div / 100;
 
   }
 
@@ -6355,6 +6416,7 @@ retry_splicing:
 
     struct queue_entry* target;
     u32 tid, split_at;
+    u8 mutation_type;
     u8* new_buf;
     s32 f_diff, l_diff;
 
@@ -6369,23 +6431,14 @@ retry_splicing:
 
     /* Pick a random queue entry and seek to it. Don't splice with yourself. */
 
-    do { tid = UR(queued_paths); } while (tid == current_entry);
+    for(i = 0; i < 16; i++) {
+      
+      target = request_seed(sock_fd, &mutation_type, 1);
+      if(target && target->len >= 2)
+        break
 
-    splicing_with = tid;
-    target = queue;
-
-    while (tid >= 100) { target = target->next_100; tid -= 100; }
-    while (tid--) target = target->next;
-
-    /* Make sure that the target has a reasonable length. */
-
-    while (target && (target->len < 2 || target == queue_cur)) {
-      target = target->next;
-      splicing_with++;
     }
-
-    if (!target) goto retry_splicing;
-
+    
     /* Read the testcase into a new buffer. */
 
     fd = open(target->fname, O_RDONLY);
@@ -6438,49 +6491,11 @@ retry_splicing:
    function is a tad too long... returns 0 if fuzzed successfully, 1 if
    skipped or bailed out. */
 
-static u8 fuzz_one(char** argv) {
+static u8 fuzz_one(char** argv, u8 mutation_type) {
 
   s32 len, fd;
   u8  *in_buf, *out_buf, *orig_in;
   u8  ret_val = 1;
-
-#ifdef IGNORE_FINDS
-
-  /* In IGNORE_FINDS mode, skip any entries that weren't in the
-     initial data set. */
-
-  if (queue_cur->depth > 1) return 1;
-
-#else
-
-  if (pending_favored) {
-
-    /* If we have any favored, non-fuzzed new arrivals in the queue,
-       possibly skip to them at the expense of already-fuzzed or non-favored
-       cases. */
-
-    if ((queue_cur->was_fuzzed || !queue_cur->favored) &&
-        UR(100) < SKIP_TO_NEW_PROB) return 1;
-
-  } else if (!dumb_mode && !queue_cur->favored && queued_paths > 10) {
-
-    /* Otherwise, still possibly skip non-favored cases, albeit less often.
-       The odds of skipping stuff are higher for already-fuzzed inputs and
-       lower for never-fuzzed entries. */
-
-    if (queue_cycle > 1 && !queue_cur->was_fuzzed) {
-
-      if (UR(100) < SKIP_NFAV_NEW_PROB) return 1;
-
-    } else {
-
-      if (UR(100) < SKIP_NFAV_OLD_PROB) return 1;
-
-    }
-
-  }
-
-#endif /* ^IGNORE_FINDS */
 
   if (not_on_tty) {
     ACTF("Fuzzing test case #%u (%u total, %llu uniq crashes found)...",
@@ -6568,56 +6583,38 @@ static u8 fuzz_one(char** argv) {
 
   memcpy(out_buf, in_buf, len);
 
-  /* Skip right away if -d is given, if we have done deterministic fuzzing on
-     this entry ourselves (was_fuzzed), or if it has gone through deterministic
-     testing in earlier, resumed runs (passed_det). */
+  switch(mutation_type)
+  
+  case M_BITFLIP:
+    mutation_bit_flip(argv, len, out_buf);
+    break;
 
-  if (skip_deterministic || queue_cur->was_fuzzed || queue_cur->passed_det)
-    goto havoc_entry;
+  case M_ARITH:
+    mutation_arith(argv, len, out_buf);
+    break;
 
-  /* Skip deterministic fuzzing if exec path checksum puts this out of scope
-     for this master instance. */
+  case M_INTEREST:
+    mutation_interest(argv, len, out_buf);
+    break;
 
-  if (master_max && (queue_cur->exec_cksum % master_max) != master_id - 1)
-    goto havoc_entry;
+  case M_EXTRAS:
+    extras_dictionary(argv, len, out_buf, in_buf)
+    break
 
-  if(mutation_bit_flip(argv, len, out_buf)) 
-    goto abandon_entry;
+  case M_HAVOC:
+    mutation_havoc_splicing(argv, len, &out_buf, &in_buf);
+    break;
 
-  if(mutation_arith(argv, len, out_buf))
-    goto abandon_entry;
-
-  if(mutation_interest(argv, len, out_buf))
-    goto abandon_entry;
-
-  if(mutation_dictionary(argv, len, out_buf, in_buf))
-    goto abandon_entry;
-
-  /* If we made this to here without jumping to havoc_stage or abandon_entry,
-     we're properly done with deterministic steps and can mark it as such
-     in the .state/ directory. */
-
-  if (!queue_cur->passed_det) mark_as_det_done(queue_cur);
-
-havoc_entry:
-
-  if(mutation_havoc_splicing(argv, len, &out_buf, &in_buf))
-    goto abandon_entry;
+  case M_SPLICE:
+    use_splicing = 1;
+    mutation_havoc_splicing(argv, len, &out_buf, &in_buf);
 
   ret_val = 0;
 
 abandon_entry:
 
-  splicing_with = -1;
-
   /* Update pending_not_fuzzed count if we made it through the calibration
      cycle and have not seen this entry before. */
-
-  if (!stop_soon && !queue_cur->cal_failed && !queue_cur->was_fuzzed) {
-    queue_cur->was_fuzzed = 1;
-    pending_not_fuzzed--;
-    if (queue_cur->favored) pending_favored--;
-  }
 
   munmap(orig_in, queue_cur->len);
 
@@ -6626,7 +6623,6 @@ abandon_entry:
 
   return ret_val;
 
-#undef FLIP_BIT
 
 }
 
@@ -6755,7 +6751,6 @@ static queue_entry* save_seed(char** argv, void *mem, u32 len, uint32_t id) {
   if (q->depth > max_depth) max_depth = q->depth;
 
   queue_paths++;
-  pending_not_fuzzed++;
   cycles_wo_finds = 0;
 
   res = calibrate_case(argv, seed_entry, mem, 0, 0);
@@ -6784,7 +6779,7 @@ out_err:
  *    mutation_type   - 变异策略 若输入为M_SPLICE则请求随机种子
  */
 
-static queue_entry* request_seed(int fd, u8* mutation_type) {
+static queue_entry* request_seed(int fd, u8* mutation_type, u8 random) {
 
   int ret = NULL, seed_id, need_cache = 1;
   packet_info_t *task_pinfo, *seed_pinfo;
@@ -6792,7 +6787,7 @@ static queue_entry* request_seed(int fd, u8* mutation_type) {
   struct queue_entry* seed_entry = NULL;
 
   /* 约定 如果有消息体则请求随机种子 否则请求顺序下一个 */
-  if (*mutation_type == M_SPLICE)
+  if (random)
     task_pinfo = new_packet(GET_TASK, NULL, 1);
   else
     task_pinfo = new_packet(GET_TASK, NULL, 0);
@@ -6839,10 +6834,17 @@ static queue_entry* request_seed(int fd, u8* mutation_type) {
 
     seed_entry = save_seed(argv, seed->content, seed->seed_len);
     if(seed_entry == NULL) goto out;
+    
+    queued_paths++;
 
   }
-
+  
   *mutation_type = seed->flag;
+
+  if(!random)
+    current_entry = seed_id;
+  else if(random && current_entry == seed_id)
+    seed_entry == NULL;
   
 out:
 
@@ -8245,61 +8247,19 @@ int main(int argc, char** argv) {
 
   while (1) {
 
-    u8 skipped_fuzz;
+    u8 mutation_type;
 
-    cull_queue();
+    do {
+      queue_cur = request_seed(sock_fd, &mutation_type, 0);
+    } while(!queue_entry && !stop_soon)
+    
+    if (stop_soon) break;
 
-    if (!queue_cur) {
-
-      queue_cycle++;
-      current_entry     = 0;
-      cur_skipped_paths = 0;
-      queue_cur         = queue;
-
-      while (seek_to) {
-        current_entry++;
-        seek_to--;
-        queue_cur = queue_cur->next;
-      }
-
-      show_stats();
-
-      if (not_on_tty) {
-        ACTF("Entering queue cycle %llu.", queue_cycle);
-        fflush(stdout);
-      }
-
-      /* If we had a full queue cycle with no new finds, try
-         recombination strategies next. */
-
-      if (queued_paths == prev_queued) {
-
-        if (use_splicing) cycles_wo_finds++; else use_splicing = 1;
-
-      } else cycles_wo_finds = 0;
-
-      prev_queued = queued_paths;
-
-      if (sync_id && queue_cycle == 1 && getenv("AFL_IMPORT_FIRST"))
-        sync_fuzzers(use_argv);
-
-    }
-
-    skipped_fuzz = fuzz_one(use_argv);
-
-    if (!stop_soon && sync_id && !skipped_fuzz) {
-      
-      if (!(sync_interval_cnt++ % SYNC_INTERVAL))
-        sync_fuzzers(use_argv);
-
-    }
+    fuzz_one(use_argv, mutation_type);
 
     if (!stop_soon && exit_1) stop_soon = 2;
 
     if (stop_soon) break;
-
-    queue_cur = queue_cur->next;
-    current_entry++;
 
   }
 
