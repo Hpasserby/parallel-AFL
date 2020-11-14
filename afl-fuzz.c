@@ -56,6 +56,7 @@
 #include <termios.h>
 #include <dlfcn.h>
 #include <sched.h>
+#include <pthread.h>
 
 #include <sys/wait.h>
 #include <sys/time.h>
@@ -66,6 +67,12 @@
 #include <sys/mman.h>
 #include <sys/ioctl.h>
 #include <sys/file.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+
+#include "para_utils/networking.h"
+#include "para_utils/work_queue.h"
 
 #if defined(__APPLE__) || defined(__FreeBSD__) || defined (__OpenBSD__)
 #  include <sys/sysctl.h>
@@ -90,6 +97,7 @@
 /* Lots of globals, but mostly for the status UI and other things where it
    really makes no sense to haul them around as function parameters. */
 
+#define CACHE_MAX 2048
 
 EXP_ST u8 *in_dir,                    /* Input directory with test cases  */
           *out_file,                  /* File to fuzz, if any             */
@@ -291,6 +299,23 @@ static u8* (*post_handler)(u8* buf, u32* len);
 static s8  interesting_8[]  = { INTERESTING_8 };
 static s16 interesting_16[] = { INTERESTING_8, INTERESTING_16 };
 static s32 interesting_32[] = { INTERESTING_8, INTERESTING_16, INTERESTING_32 };
+
+/* 连接fuzz服务器 */
+static int sock_fd;
+
+/* 种子缓存表 从seed_id映射到queue_entry */
+typedef struct seed_cache_entry {
+
+  s32 seed_id;
+  struct queue_entry *seed_info;
+
+} seed_cache_entry_t;
+
+static seed_cache_entry_t seed_cache[CACHE_MAX];
+
+/* fuzz任务队列 */
+static queue_t *task_queue;
+static pthread_mutex_t *get_task_mutex;
 
 /* Fuzzing stages */
 
@@ -6326,8 +6351,7 @@ havoc_stage:
 
 retry_splicing:
 
-  if (use_splicing && splice_cycle++ < SPLICE_CYCLES &&
-      queued_paths > 1 && queue_cur->len > 1) {
+  if (use_splicing && splice_cycle++ < SPLICE_CYCLES) {
 
     struct queue_entry* target;
     u32 tid, split_at;
@@ -6603,6 +6627,234 @@ abandon_entry:
   return ret_val;
 
 #undef FLIP_BIT
+
+}
+
+
+static int initialize_client() {
+
+  sock_fd = get_tcp_client("127.0.0.1", 8888);
+  if (sock_fd < 0)
+    fatal("[-] get_tcp_client");
+
+  task_queue = new_queue(/*nonblock*/0, 0);
+  if(task_queue == NULL)
+    fatal("[-] new_queue");
+
+  memset(seed_cache, 0 sizeof(seed_cache));
+
+  pthread_mutex_init(&get_task_mutex, NULL);
+
+  return 0;
+}
+
+
+/* 搜索本地是否缓存种子 */
+
+static struct queue_entry* search_cache(s32 id) {
+
+  int off, index;
+
+  index = id % CACHE_MAX;
+
+  for (off = 0; off < CACHE_MAX; off++) {
+
+    if (seed_cache[index].seed_id == id)
+      return seed_cache[index].seed_info;
+    index++;
+
+  }
+
+  return NULL;
+
+}
+
+/* 添加缓存信息 */
+
+static void add_cache(s32 id, struct queue_entry* seed_info) {
+
+  int off, index;
+  u8 *fn;
+
+  index = id % CACHE_MAX;
+  
+  for (off = 0; off < CACHE_MAX; off++) {
+
+    if (seed_cache[index].seed_info == NULL)
+      break;
+    index++;
+
+  }
+  
+  if (off == CACHE_MAX) {
+    
+    struct queue_entry *tmp;
+
+    tmp = seed_cache[index].seed_info;
+
+    fn = tmp->fname;
+    if (fn) {
+      unlink(fn); 
+      free(fn);
+    }
+    if(!--tmp->tc_ref)
+      ck_free(tmp->trace_mini); 
+
+    free(tmp);
+
+  }
+
+  seed_cache[index].id = id;
+  seed_cache[index].seed_info = seed_info;
+
+}
+
+
+/* 根据文件名获取seed的id */
+
+static s32 get_seed_id(u8 *fn) {
+
+  s32 id;
+  char *start, *end;
+  
+  start = strstr(fn, "id:");
+  if(start == NULL)
+    return -1;
+  start += 3;
+  
+  end = strstr(start, ",");
+  if(end == NULL)
+    return -1;
+
+  if(end - start != 6)
+    return -1;
+
+  id = atoi(start);
+
+  return id;
+}
+
+
+static queue_entry* save_seed(char** argv, void *mem, u32 len, uint32_t id) {
+  
+  u8 res;
+  u8* fn = "";
+  s32 fd;
+  struct queue_entry *seed_entry;
+
+  fn = alloc_printf("%s/cache/id_%06u", out_dir, queued_paths);
+  
+  seed_entry = ck_alloc(sizeof(struct queue_entry));
+
+  q->fname          = fn;
+  q->len            = len;
+  q->depth          = cur_depth + 1;
+  q->passed_det     = 0;
+  q->exec_cksum     = 0;
+  
+  if (q->depth > max_depth) max_depth = q->depth;
+
+  queue_paths++;
+  pending_not_fuzzed++;
+  cycles_wo_finds = 0;
+
+  res = calibrate_case(argv, seed_entry, mem, 0, 0);
+  if (res == FAULT_ERROR)
+    goto out_err;
+  
+  fd = open(fn, O_WRONLY | O_CREAT | O_EXCL, 0600);
+  if (fd < 0) PFATAL("Unable to create '%s'", fn);
+  ck_write(fd, mem, len, fn);
+  close(fd);
+  
+  add_cache(id, seed_entry);
+
+  return seed_entry;
+
+out_err:
+  free(fn);
+  free(seed_entry);
+  return NULL;
+
+}
+
+
+/* 向服务器获取fuzz任务
+ *    fd              - 网络套接字描述符
+ *    mutation_type   - 变异策略 若输入为M_SPLICE则请求随机种子
+ */
+
+static queue_entry* request_seed(int fd, u8* mutation_type) {
+
+  int ret = NULL, seed_id, need_cache = 1;
+  packet_info_t *task_pinfo, *seed_pinfo;
+  seed_info_t *seed;
+  struct queue_entry* seed_entry = NULL;
+
+  /* 约定 如果有消息体则请求随机种子 否则请求顺序下一个 */
+  if (*mutation_type == M_SPLICE)
+    task_pinfo = new_packet(GET_TASK, NULL, 1);
+  else
+    task_pinfo = new_packet(GET_TASK, NULL, 0);
+  if (task_pinfo == NULL) fatal("new_packet");
+
+  ret = send_packet(fd, task_pinfo);
+  if (ret < 0) goto sock_err;
+
+  free(task_pinfo);
+
+  task_pinfo = recv_packet(fd);
+  if (task_pinfo == NULL) goto sock_err;
+
+  seed = (seed_info_t*)packet_data(task_pinfo);
+  if (seed == NULL) goto out;
+
+  seed_id = get_seed_id(seed->content);
+  
+  seed_entry = search_cache(seed_id);
+  if (seed_entry) 
+    need_cache = 0;
+  
+  if (need_cache) {
+
+    u8 fault;
+    u8 *mem;
+
+    seed_pinfo = new_packet(GET_SEED, seed, seed->size);
+    if(seed_pinfo == NULL) fatal("new_packet");
+
+    ret = send_packet(seed_pinfo);
+    if(ret < 0) goto sock_err;
+
+    free(seed_pinfo);
+    
+    seed_pinfo = recv_packet(fd);
+    if(seed_pinfo == NULL) goto sock_err;
+
+    seed = (seed_info_t*)packet_data(seed_pinfo);
+    if(seed == NULL) goto out;
+
+    write_to_testcase(seed->content, seed->seed_len);
+    fault = run_target(argv, exec_tmout);
+
+    seed_entry = save_seed(argv, seed->content, seed->seed_len);
+    if(seed_entry == NULL) goto out;
+
+  }
+
+  *mutation_type = seed->flag;
+  
+out:
+
+  free(task_pinfo);
+  free(seed_pinfo);
+  return seed_entry;
+
+sock_err:
+
+  fprintf(stderr, "[-] get_task: socket error\n");
+  stop_soon = 1;
+  return NULL;
 
 }
 
@@ -7101,6 +7353,11 @@ EXP_ST void setup_dirs_fds(void) {
   /* Queue directory for any starting & discovered paths. */
 
   tmp = alloc_printf("%s/queue", out_dir);
+  if (mkdir(tmp, 0700)) PFATAL("Unable to create '%s'", tmp);
+  ck_free(tmp);
+
+  /* 并行模式用于缓存种子 */
+  tmp = alloc_printf("%s/cache", out_dir);
   if (mkdir(tmp, 0700)) PFATAL("Unable to create '%s'", tmp);
   ck_free(tmp);
 
@@ -7703,7 +7960,7 @@ int main(int argc, char** argv) {
   struct timeval tv;
   struct timezone tz;
 
-  SAYF(cCYA "afl-fuzz " cBRI VERSION cRST " by <lcamtuf@google.com>\n");
+  SAYF(cCYA "afl-fuzz " cBRI VERSION cRST " by <hgy5945@gmail.com>\n");
 
   doc_path = access(DOC_PATH, F_OK) ? "docs" : DOC_PATH;
 
@@ -8077,6 +8334,8 @@ stop_fuzzing:
            "    (For info on resuming, see %s/README.)\n", doc_path);
 
   }
+
+  close(sock_fd);
 
   fclose(plot_file);
   destroy_queue();
