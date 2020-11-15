@@ -41,12 +41,9 @@ int send_data(int fd, void* buf, size_t nr) {
 
   while (sent < nr) {
   
-    int nbytes, len;
+    int nbytes;
 
-    len = nr - sent > MAX_SEND ?
-            MAX_SEND : nr - sent;
-  
-    nbytes = send(fd, buf, len, 0);
+    nbytes = send(fd, (char*)buf + sent, nr - sent, 0);
     if (nbytes < 0) {
       if (errno == EWOULDBLOCK ||
           errno == EAGAIN || errno == EINTR)

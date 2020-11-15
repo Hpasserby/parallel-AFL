@@ -5,8 +5,6 @@
 #include <sys/types.h>
 #include <netinet/in.h>
 
-#define MAX_SEND 0x2000
-
 /* COMMAND in packet */
 #define PUT_SEED    0   /* 上传新种子 */
 #define GET_TASK    1   /* 请求fuzz任务 */
