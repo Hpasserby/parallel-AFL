@@ -4266,7 +4266,7 @@ static void show_stats(void) {
 
   SAYF(bV bSTOP "  dictionary : " cRST "%-37s " bSTG bV bSTOP
        "  imported : " cRST "%-10s " bSTG bV "\n", tmp,
-       sync_id ? DI(queued_imported) : (u8*)"n/a");
+        DI(queued_imported));
 
   sprintf(tmp, "%s/%s, %s/%s",
           DI(stage_finds[STAGE_HAVOC]), DI(stage_cycles[STAGE_HAVOC]),
@@ -4486,8 +4486,6 @@ static int handle_new_client(int listen_fd) {
 
   if(si.sfd < 0)
     return si.sfd;
-
-  printf("[+] new client accepted\n");
 
   return si.sfd;
 
@@ -4906,8 +4904,6 @@ static int handle_request(char** argv, int client_fd) {
     else
       ++cur_thread_num;
 
-    printf("[+] new work thread created\n");
-
   }
   pthread_mutex_unlock(&thread_num_mutex);
 
@@ -4936,7 +4932,7 @@ static int initialize_server() {
   pthread_mutex_init(&seed_queue_mutex, NULL);
   pthread_mutex_init(&bitmap_mutex, NULL);
 
-  listen_fd = get_tcp_server("127.0.0.1", 8888);
+  listen_fd = get_tcp_server(8888);
   if (listen_fd < 0)
     fatal("[-] get_tcp_server");
 

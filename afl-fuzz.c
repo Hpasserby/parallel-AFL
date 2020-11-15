@@ -169,7 +169,6 @@ static volatile u8 stop_soon,         /* Ctrl-C pressed?                  */
 
 EXP_ST u32 queued_paths,              /* Total number of queued testcases */
            queued_variable,           /* Testcases with variable behavior */
-           queued_at_start,           /* Total number of initial inputs   */
            queued_discovered,         /* Items discovered during this run */
            queued_imported,           /* Items imported via -S            */
            queued_favored,            /* Paths deemed favorable           */
@@ -207,15 +206,11 @@ EXP_ST u64 total_crashes,             /* Total number of crashes          */
 static u32 subseq_tmouts;             /* Number of timeouts in a row      */
 
 static u8 *stage_name = "init",       /* Name of the current fuzz stage   */
-          *stage_short,               /* Short stage name                 */
-          *syncing_party;             /* Currently syncing with...        */
+          *stage_short;               /* Short stage name                 */
 
 static s32 stage_cur, stage_max;      /* Stage progression                */
-static s32 splicing_with = -1;        /* Splicing with which test case?   */
 
 static u32 master_id, master_max;     /* Master instance job splitting    */
-
-static u32 syncing_case;              /* Syncing with case #...           */
 
 static s32 stage_cur_byte,            /* Byte offset of current stage op  */
            stage_cur_val;             /* Value used for stage op          */
@@ -273,9 +268,7 @@ struct queue_entry {
 };
 
 static struct queue_entry *queue,     /* Fuzzing queue (linked list)      */
-                          *queue_cur, /* Current offset within the queue  */
-                          *queue_top, /* Top of the list                  */
-                          *q_prev100; /* Previous 100 marker              */
+                          *queue_cur; /* Current offset within the queue  */
 
 static struct queue_entry*
   top_rated[MAP_SIZE];                /* Top entries for bitmap bytes     */
@@ -413,24 +406,6 @@ static inline u32 UR(u32 limit) {
   }
 
   return random() % limit;
-
-}
-
-
-/* Shuffle an array of pointers. Might be slightly biased. */
-
-static void shuffle_ptrs(void** ptrs, u32 cnt) {
-
-  u32 i;
-
-  for (i = 0; i < cnt - 2; i++) {
-
-    u32 j = i + UR(cnt - i);
-    void *s = ptrs[i];
-    ptrs[i] = ptrs[j];
-    ptrs[j] = s;
-
-  }
 
 }
 
@@ -737,28 +712,6 @@ static u8* DTD(u64 cur_ms, u64 event_ms) {
 }
 
 
-/* Mark deterministic checks as done for a particular queue entry. We use the
-   .state file to avoid repeating deterministic fuzzing when resuming aborted
-   scans. */
-
-static void mark_as_det_done(struct queue_entry* q) {
-
-  u8* fn = strrchr(q->fname, '/');
-  s32 fd;
-
-  fn = alloc_printf("%s/queue/.state/deterministic_done/%s", out_dir, fn + 1);
-
-  fd = open(fn, O_WRONLY | O_CREAT | O_EXCL, 0600);
-  if (fd < 0) PFATAL("Unable to create '%s'", fn);
-  close(fd);
-
-  ck_free(fn);
-
-  q->passed_det = 1;
-
-}
-
-
 /* Mark as variable. Create symlinks if possible to make it easier to examine
    the files. */
 
@@ -781,75 +734,6 @@ static void mark_as_variable(struct queue_entry* q) {
   ck_free(fn);
 
   q->var_behavior = 1;
-
-}
-
-
-/* Mark / unmark as redundant (edge-only). This is not used for restoring state,
-   but may be useful for post-processing datasets. */
-
-static void mark_as_redundant(struct queue_entry* q, u8 state) {
-
-  u8* fn;
-  s32 fd;
-
-  if (state == q->fs_redundant) return;
-
-  q->fs_redundant = state;
-
-  fn = strrchr(q->fname, '/');
-  fn = alloc_printf("%s/queue/.state/redundant_edges/%s", out_dir, fn + 1);
-
-  if (state) {
-
-    fd = open(fn, O_WRONLY | O_CREAT | O_EXCL, 0600);
-    if (fd < 0) PFATAL("Unable to create '%s'", fn);
-    close(fd);
-
-  } else {
-
-    if (unlink(fn)) PFATAL("Unable to remove '%s'", fn);
-
-  }
-
-  ck_free(fn);
-
-}
-
-
-/* Append new test case to the queue. */
-
-static void add_to_queue(u8* fname, u32 len, u8 passed_det) {
-
-  struct queue_entry* q = ck_alloc(sizeof(struct queue_entry));
-
-  q->fname        = fname;
-  q->len          = len;
-  q->depth        = cur_depth + 1;
-  q->passed_det   = passed_det;
-
-  if (q->depth > max_depth) max_depth = q->depth;
-
-  if (queue_top) {
-
-    queue_top->next = q;
-    queue_top = q;
-
-  } else q_prev100 = queue = queue_top = q;
-
-  queued_paths++;
-  pending_not_fuzzed++;
-
-  cycles_wo_finds = 0;
-
-  if (!(queued_paths % 100)) {
-
-    q_prev100->next_100 = q;
-    q_prev100 = q;
-
-  }
-
-  last_path_time = get_cur_time();
 
 }
 
@@ -1372,65 +1256,6 @@ static void update_bitmap_score(struct queue_entry* q) {
 }
 
 
-/* The second part of the mechanism discussed above is a routine that
-   goes over top_rated[] entries, and then sequentially grabs winners for
-   previously-unseen bytes (temp_v) and marks them as favored, at least
-   until the next run. The favored entries are given more air time during
-   all fuzzing steps. */
-
-static void cull_queue(void) {
-
-  struct queue_entry* q;
-  static u8 temp_v[MAP_SIZE >> 3];
-  u32 i;
-
-  if (dumb_mode || !score_changed) return;
-
-  score_changed = 0;
-
-  memset(temp_v, 255, MAP_SIZE >> 3);
-
-  queued_favored  = 0;
-  pending_favored = 0;
-
-  q = queue;
-
-  while (q) {
-    q->favored = 0;
-    q = q->next;
-  }
-
-  /* Let's see if anything in the bitmap isn't captured in temp_v.
-     If yes, and if it has a top_rated[] contender, let's use it. */
-
-  for (i = 0; i < MAP_SIZE; i++)
-    if (top_rated[i] && (temp_v[i >> 3] & (1 << (i & 7)))) {
-
-      u32 j = MAP_SIZE >> 3;
-
-      /* Remove all bits belonging to the current entry from temp_v. */
-
-      while (j--) 
-        if (top_rated[i]->trace_mini[j])
-          temp_v[j] &= ~top_rated[i]->trace_mini[j];
-
-      top_rated[i]->favored = 1;
-      queued_favored++;
-
-      if (!top_rated[i]->was_fuzzed) pending_favored++;
-
-    }
-
-  q = queue;
-
-  while (q) {
-    mark_as_redundant(q, !q->favored);
-    q = q->next;
-  }
-
-}
-
-
 /* Configure shared memory and virgin_bits. This is called at startup. */
 
 EXP_ST void setup_shm(void) {
@@ -1489,110 +1314,6 @@ static void setup_post(void) {
   post_handler("hello", &tlen);
 
   OKF("Postprocessor installed successfully.");
-
-}
-
-
-/* Read all testcases from the input directory, then queue them for testing.
-   Called at startup. */
-
-static void read_testcases(void) {
-
-  struct dirent **nl;
-  s32 nl_cnt;
-  u32 i;
-  u8* fn;
-
-  /* Auto-detect non-in-place resumption attempts. */
-
-  fn = alloc_printf("%s/queue", in_dir);
-  if (!access(fn, F_OK)) in_dir = fn; else ck_free(fn);
-
-  ACTF("Scanning '%s'...", in_dir);
-
-  /* We use scandir() + alphasort() rather than readdir() because otherwise,
-     the ordering  of test cases would vary somewhat randomly and would be
-     difficult to control. */
-
-  nl_cnt = scandir(in_dir, &nl, NULL, alphasort);
-
-  if (nl_cnt < 0) {
-
-    if (errno == ENOENT || errno == ENOTDIR)
-
-      SAYF("\n" cLRD "[-] " cRST
-           "The input directory does not seem to be valid - try again. The fuzzer needs\n"
-           "    one or more test case to start with - ideally, a small file under 1 kB\n"
-           "    or so. The cases must be stored as regular files directly in the input\n"
-           "    directory.\n");
-
-    PFATAL("Unable to open '%s'", in_dir);
-
-  }
-
-  if (shuffle_queue && nl_cnt > 1) {
-
-    ACTF("Shuffling queue...");
-    shuffle_ptrs((void**)nl, nl_cnt);
-
-  }
-
-  for (i = 0; i < nl_cnt; i++) {
-
-    struct stat st;
-
-    u8* fn = alloc_printf("%s/%s", in_dir, nl[i]->d_name);
-    u8* dfn = alloc_printf("%s/.state/deterministic_done/%s", in_dir, nl[i]->d_name);
-
-    u8  passed_det = 0;
-
-    free(nl[i]); /* not tracked */
- 
-    if (lstat(fn, &st) || access(fn, R_OK))
-      PFATAL("Unable to access '%s'", fn);
-
-    /* This also takes care of . and .. */
-
-    if (!S_ISREG(st.st_mode) || !st.st_size || strstr(fn, "/README.txt")) {
-
-      ck_free(fn);
-      ck_free(dfn);
-      continue;
-
-    }
-
-    if (st.st_size > MAX_FILE) 
-      FATAL("Test case '%s' is too big (%s, limit is %s)", fn,
-            DMS(st.st_size), DMS(MAX_FILE));
-
-    /* Check for metadata that indicates that deterministic fuzzing
-       is complete for this entry. We don't want to repeat deterministic
-       fuzzing when resuming aborted scans, because it would be pointless
-       and probably very time-consuming. */
-
-    if (!access(dfn, F_OK)) passed_det = 1;
-    ck_free(dfn);
-
-    add_to_queue(fn, st.st_size, passed_det);
-
-  }
-
-  free(nl); /* not tracked */
-
-  if (!queued_paths) {
-
-    SAYF("\n" cLRD "[-] " cRST
-         "Looks like there are no valid test cases in the input directory! The fuzzer\n"
-         "    needs one or more test case to start with - ideally, a small file under\n"
-         "    1 kB or so. The cases must be stored as regular files directly in the\n"
-         "    input directory.\n");
-
-    FATAL("No usable test cases in '%s'", in_dir);
-
-  }
-
-  last_path_time = 0;
-  queued_at_start = queued_paths;
 
 }
 
@@ -2786,441 +2507,6 @@ abort_calibration:
 }
 
 
-/* Examine map coverage. Called once, for first test case. */
-
-static void check_map_coverage(void) {
-
-  u32 i;
-
-  if (count_bytes(trace_bits) < 100) return;
-
-  for (i = (1 << (MAP_SIZE_POW2 - 1)); i < MAP_SIZE; i++)
-    if (trace_bits[i]) return;
-
-  WARNF("Recompile binary with newer version of afl to improve coverage!");
-
-}
-
-
-/* Perform dry run of all test cases to confirm that the app is working as
-   expected. This is done only for the initial inputs, and only once. */
-
-static void perform_dry_run(char** argv) {
-
-  struct queue_entry* q = queue;
-  u32 cal_failures = 0;
-  u8* skip_crashes = getenv("AFL_SKIP_CRASHES");
-
-  while (q) {
-
-    u8* use_mem;
-    u8  res;
-    s32 fd;
-
-    u8* fn = strrchr(q->fname, '/') + 1;
-
-    ACTF("Attempting dry run with '%s'...", fn);
-
-    fd = open(q->fname, O_RDONLY);
-    if (fd < 0) PFATAL("Unable to open '%s'", q->fname);
-
-    use_mem = ck_alloc_nozero(q->len);
-
-    if (read(fd, use_mem, q->len) != q->len)
-      FATAL("Short read from '%s'", q->fname);
-
-    close(fd);
-
-    res = calibrate_case(argv, q, use_mem, 0, 1);
-    ck_free(use_mem);
-
-    if (stop_soon) return;
-
-    if (res == crash_mode || res == FAULT_NOBITS)
-      SAYF(cGRA "    len = %u, map size = %u, exec speed = %llu us\n" cRST, 
-           q->len, q->bitmap_size, q->exec_us);
-
-    switch (res) {
-
-      case FAULT_NONE:
-
-        if (q == queue) check_map_coverage();
-
-        if (crash_mode) FATAL("Test case '%s' does *NOT* crash", fn);
-
-        break;
-
-      case FAULT_TMOUT:
-
-        if (timeout_given) {
-
-          /* The -t nn+ syntax in the command line sets timeout_given to '2' and
-             instructs afl-fuzz to tolerate but skip queue entries that time
-             out. */
-
-          if (timeout_given > 1) {
-            WARNF("Test case results in a timeout (skipping)");
-            q->cal_failed = CAL_CHANCES;
-            cal_failures++;
-            break;
-          }
-
-          SAYF("\n" cLRD "[-] " cRST
-               "The program took more than %u ms to process one of the initial test cases.\n"
-               "    Usually, the right thing to do is to relax the -t option - or to delete it\n"
-               "    altogether and allow the fuzzer to auto-calibrate. That said, if you know\n"
-               "    what you are doing and want to simply skip the unruly test cases, append\n"
-               "    '+' at the end of the value passed to -t ('-t %u+').\n", exec_tmout,
-               exec_tmout);
-
-          FATAL("Test case '%s' results in a timeout", fn);
-
-        } else {
-
-          SAYF("\n" cLRD "[-] " cRST
-               "The program took more than %u ms to process one of the initial test cases.\n"
-               "    This is bad news; raising the limit with the -t option is possible, but\n"
-               "    will probably make the fuzzing process extremely slow.\n\n"
-
-               "    If this test case is just a fluke, the other option is to just avoid it\n"
-               "    altogether, and find one that is less of a CPU hog.\n", exec_tmout);
-
-          FATAL("Test case '%s' results in a timeout", fn);
-
-        }
-
-      case FAULT_CRASH:  
-
-        if (crash_mode) break;
-
-        if (skip_crashes) {
-          WARNF("Test case results in a crash (skipping)");
-          q->cal_failed = CAL_CHANCES;
-          cal_failures++;
-          break;
-        }
-
-        if (mem_limit) {
-
-          SAYF("\n" cLRD "[-] " cRST
-               "Oops, the program crashed with one of the test cases provided. There are\n"
-               "    several possible explanations:\n\n"
-
-               "    - The test case causes known crashes under normal working conditions. If\n"
-               "      so, please remove it. The fuzzer should be seeded with interesting\n"
-               "      inputs - but not ones that cause an outright crash.\n\n"
-
-               "    - The current memory limit (%s) is too low for this program, causing\n"
-               "      it to die due to OOM when parsing valid files. To fix this, try\n"
-               "      bumping it up with the -m setting in the command line. If in doubt,\n"
-               "      try something along the lines of:\n\n"
-
-#ifdef RLIMIT_AS
-               "      ( ulimit -Sv $[%llu << 10]; /path/to/binary [...] <testcase )\n\n"
-#else
-               "      ( ulimit -Sd $[%llu << 10]; /path/to/binary [...] <testcase )\n\n"
-#endif /* ^RLIMIT_AS */
-
-               "      Tip: you can use http://jwilk.net/software/recidivm to quickly\n"
-               "      estimate the required amount of virtual memory for the binary. Also,\n"
-               "      if you are using ASAN, see %s/notes_for_asan.txt.\n\n"
-
-#ifdef __APPLE__
-  
-               "    - On MacOS X, the semantics of fork() syscalls are non-standard and may\n"
-               "      break afl-fuzz performance optimizations when running platform-specific\n"
-               "      binaries. To fix this, set AFL_NO_FORKSRV=1 in the environment.\n\n"
-
-#endif /* __APPLE__ */
-
-               "    - Least likely, there is a horrible bug in the fuzzer. If other options\n"
-               "      fail, poke <lcamtuf@coredump.cx> for troubleshooting tips.\n",
-               DMS(mem_limit << 20), mem_limit - 1, doc_path);
-
-        } else {
-
-          SAYF("\n" cLRD "[-] " cRST
-               "Oops, the program crashed with one of the test cases provided. There are\n"
-               "    several possible explanations:\n\n"
-
-               "    - The test case causes known crashes under normal working conditions. If\n"
-               "      so, please remove it. The fuzzer should be seeded with interesting\n"
-               "      inputs - but not ones that cause an outright crash.\n\n"
-
-#ifdef __APPLE__
-  
-               "    - On MacOS X, the semantics of fork() syscalls are non-standard and may\n"
-               "      break afl-fuzz performance optimizations when running platform-specific\n"
-               "      binaries. To fix this, set AFL_NO_FORKSRV=1 in the environment.\n\n"
-
-#endif /* __APPLE__ */
-
-               "    - Least likely, there is a horrible bug in the fuzzer. If other options\n"
-               "      fail, poke <lcamtuf@coredump.cx> for troubleshooting tips.\n");
-
-        }
-
-        FATAL("Test case '%s' results in a crash", fn);
-
-      case FAULT_ERROR:
-
-        FATAL("Unable to execute target application ('%s')", argv[0]);
-
-      case FAULT_NOINST:
-
-        FATAL("No instrumentation detected");
-
-      case FAULT_NOBITS: 
-
-        useless_at_start++;
-
-        if (!in_bitmap && !shuffle_queue)
-          WARNF("No new instrumentation output, test case may be useless.");
-
-        break;
-
-    }
-
-    if (q->var_behavior) WARNF("Instrumentation output varies across runs.");
-
-    q = q->next;
-
-  }
-
-  if (cal_failures) {
-
-    if (cal_failures == queued_paths)
-      FATAL("All test cases time out%s, giving up!",
-            skip_crashes ? " or crash" : "");
-
-    WARNF("Skipped %u test cases (%0.02f%%) due to timeouts%s.", cal_failures,
-          ((double)cal_failures) * 100 / queued_paths,
-          skip_crashes ? " or crashes" : "");
-
-    if (cal_failures * 5 > queued_paths)
-      WARNF(cLRD "High percentage of rejected test cases, check settings!");
-
-  }
-
-  OKF("All test cases processed.");
-
-}
-
-
-/* Helper function: link() if possible, copy otherwise. */
-
-static void link_or_copy(u8* old_path, u8* new_path) {
-
-  s32 i = link(old_path, new_path);
-  s32 sfd, dfd;
-  u8* tmp;
-
-  if (!i) return;
-
-  sfd = open(old_path, O_RDONLY);
-  if (sfd < 0) PFATAL("Unable to open '%s'", old_path);
-
-  dfd = open(new_path, O_WRONLY | O_CREAT | O_EXCL, 0600);
-  if (dfd < 0) PFATAL("Unable to create '%s'", new_path);
-
-  tmp = ck_alloc(64 * 1024);
-
-  while ((i = read(sfd, tmp, 64 * 1024)) > 0) 
-    ck_write(dfd, tmp, i, new_path);
-
-  if (i < 0) PFATAL("read() failed");
-
-  ck_free(tmp);
-  close(sfd);
-  close(dfd);
-
-}
-
-
-static void nuke_resume_dir(void);
-
-/* Create hard links for input test cases in the output directory, choosing
-   good names and pivoting accordingly. */
-
-static void pivot_inputs(void) {
-
-  struct queue_entry* q = queue;
-  u32 id = 0;
-
-  ACTF("Creating hard links for all input files...");
-
-  while (q) {
-
-    u8  *nfn, *rsl = strrchr(q->fname, '/');
-    u32 orig_id;
-
-    if (!rsl) rsl = q->fname; else rsl++;
-
-    /* If the original file name conforms to the syntax and the recorded
-       ID matches the one we'd assign, just use the original file name.
-       This is valuable for resuming fuzzing runs. */
-
-#ifndef SIMPLE_FILES
-#  define CASE_PREFIX "id:"
-#else
-#  define CASE_PREFIX "id_"
-#endif /* ^!SIMPLE_FILES */
-
-    if (!strncmp(rsl, CASE_PREFIX, 3) &&
-        sscanf(rsl + 3, "%06u", &orig_id) == 1 && orig_id == id) {
-
-      u8* src_str;
-      u32 src_id;
-
-      resuming_fuzz = 1;
-      nfn = alloc_printf("%s/queue/%s", out_dir, rsl);
-
-      /* Since we're at it, let's also try to find parent and figure out the
-         appropriate depth for this entry. */
-
-      src_str = strchr(rsl + 3, ':');
-
-      if (src_str && sscanf(src_str + 1, "%06u", &src_id) == 1) {
-
-        struct queue_entry* s = queue;
-        while (src_id-- && s) s = s->next;
-        if (s) q->depth = s->depth + 1;
-
-        if (max_depth < q->depth) max_depth = q->depth;
-
-      }
-
-    } else {
-
-      /* No dice - invent a new name, capturing the original one as a
-         substring. */
-
-#ifndef SIMPLE_FILES
-
-      u8* use_name = strstr(rsl, ",orig:");
-
-      if (use_name) use_name += 6; else use_name = rsl;
-      nfn = alloc_printf("%s/queue/id:%06u,orig:%s", out_dir, id, use_name);
-
-#else
-
-      nfn = alloc_printf("%s/queue/id_%06u", out_dir, id);
-
-#endif /* ^!SIMPLE_FILES */
-
-    }
-
-    /* Pivot to the new queue entry. */
-
-    link_or_copy(q->fname, nfn);
-    ck_free(q->fname);
-    q->fname = nfn;
-
-    /* Make sure that the passed_det value carries over, too. */
-
-    if (q->passed_det) mark_as_det_done(q);
-
-    q = q->next;
-    id++;
-
-  }
-
-  if (in_place_resume) nuke_resume_dir();
-
-}
-
-
-#ifndef SIMPLE_FILES
-
-/* Construct a file name for a new test case, capturing the operation
-   that led to its discovery. Uses a static buffer. */
-
-static u8* describe_op(u8 hnb) {
-
-  static u8 ret[256];
-
-  if (syncing_party) {
-
-    sprintf(ret, "sync:%s,src:%06u", syncing_party, syncing_case);
-
-  } else {
-
-    sprintf(ret, "src:%06u", current_entry);
-
-    if (splicing_with >= 0)
-      sprintf(ret + strlen(ret), "+%06u", splicing_with);
-
-    sprintf(ret + strlen(ret), ",op:%s", stage_short);
-
-    if (stage_cur_byte >= 0) {
-
-      sprintf(ret + strlen(ret), ",pos:%u", stage_cur_byte);
-
-      if (stage_val_type != STAGE_VAL_NONE)
-        sprintf(ret + strlen(ret), ",val:%s%+d", 
-                (stage_val_type == STAGE_VAL_BE) ? "be:" : "",
-                stage_cur_val);
-
-    } else sprintf(ret + strlen(ret), ",rep:%u", stage_cur_val);
-
-  }
-
-  if (hnb == 2) strcat(ret, ",+cov");
-
-  return ret;
-
-}
-
-#endif /* !SIMPLE_FILES */
-
-
-/* Write a message accompanying the crash directory :-) */
-
-static void write_crash_readme(void) {
-
-  u8* fn = alloc_printf("%s/crashes/README.txt", out_dir);
-  s32 fd;
-  FILE* f;
-
-  fd = open(fn, O_WRONLY | O_CREAT | O_EXCL, 0600);
-  ck_free(fn);
-
-  /* Do not die on errors here - that would be impolite. */
-
-  if (fd < 0) return;
-
-  f = fdopen(fd, "w");
-
-  if (!f) {
-    close(fd);
-    return;
-  }
-
-  fprintf(f, "Command line used to find this crash:\n\n"
-
-             "%s\n\n"
-
-             "If you can't reproduce a bug outside of afl-fuzz, be sure to set the same\n"
-             "memory limit. The limit used for this fuzzing session was %s.\n\n"
-
-             "Need a tool to minimize test cases before investigating the crashes or sending\n"
-             "them to a vendor? Check out the afl-tmin that comes with the fuzzer!\n\n"
-
-             "Found any cool bugs in open-source tools using afl-fuzz? If yes, please drop\n"
-             "me a mail at <lcamtuf@coredump.cx> once the issues are fixed - I'd love to\n"
-             "add your finds to the gallery at:\n\n"
-
-             "  http://lcamtuf.coredump.cx/afl/\n\n"
-
-             "Thanks :-)\n",
-
-             orig_cmdline, DMS(mem_limit << 20)); /* ignore errors */
-
-  fclose(f);
-
-}
-
-
 static u8 upload_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
 
   s32 ret;
@@ -3234,6 +2520,8 @@ static u8 upload_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
       if (crash_mode) total_crashes++;
       return 0;
     }
+  
+    last_path_time = get_cur_time();
 
     goto do_upload;
 
@@ -3334,233 +2622,10 @@ do_upload:
     fprintf(stderr, "[-] upload_if_interesting: socket error\n");
     stop_soon = 1;
   }
-
+  
   free(pinfo);
   free(seed_info);
   return !!ret;
-
-}
-
-
-/* Check if the result of an execve() during routine fuzzing is interesting,
-   save or queue the input test case for further analysis if so. Returns 1 if
-   entry is saved, 0 otherwise. */
-
-static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
-
-  u8  *fn = "";
-  u8  hnb;
-  s32 fd;
-  u8  keeping = 0, res;
-
-  if (fault == crash_mode) {
-
-    /* Keep only if there are new bits in the map, add to queue for
-       future fuzzing, etc. */
-
-    if (!(hnb = has_new_bits(virgin_bits))) {
-      if (crash_mode) total_crashes++;
-      return 0;
-    }    
-
-#ifndef SIMPLE_FILES
-
-    fn = alloc_printf("%s/queue/id:%06u,%s", out_dir, queued_paths,
-                      describe_op(hnb));
-
-#else
-
-    fn = alloc_printf("%s/queue/id_%06u", out_dir, queued_paths);
-
-#endif /* ^!SIMPLE_FILES */
-
-    add_to_queue(fn, len, 0);
-
-    if (hnb == 2) {
-      queue_top->has_new_cov = 1;
-      queued_with_cov++;
-    }
-
-    queue_top->exec_cksum = hash32(trace_bits, MAP_SIZE, HASH_CONST);
-
-    /* Try to calibrate inline; this also calls update_bitmap_score() when
-       successful. */
-
-    res = calibrate_case(argv, queue_top, mem, queue_cycle - 1, 0);
-
-    if (res == FAULT_ERROR)
-      FATAL("Unable to execute target application");
-
-    fd = open(fn, O_WRONLY | O_CREAT | O_EXCL, 0600);
-    if (fd < 0) PFATAL("Unable to create '%s'", fn);
-    ck_write(fd, mem, len, fn);
-    close(fd);
-
-    keeping = 1;
-
-  }
-
-  switch (fault) {
-
-    case FAULT_TMOUT:
-
-      /* Timeouts are not very interesting, but we're still obliged to keep
-         a handful of samples. We use the presence of new bits in the
-         hang-specific bitmap as a signal of uniqueness. In "dumb" mode, we
-         just keep everything. */
-
-      total_tmouts++;
-
-      if (unique_hangs >= KEEP_UNIQUE_HANG) return keeping;
-
-      if (!dumb_mode) {
-
-#ifdef WORD_SIZE_64
-        simplify_trace((u64*)trace_bits);
-#else
-        simplify_trace((u32*)trace_bits);
-#endif /* ^WORD_SIZE_64 */
-
-        if (!has_new_bits(virgin_tmout)) return keeping;
-
-      }
-
-      unique_tmouts++;
-
-      /* Before saving, we make sure that it's a genuine hang by re-running
-         the target with a more generous timeout (unless the default timeout
-         is already generous). */
-
-      if (exec_tmout < hang_tmout) {
-
-        u8 new_fault;
-        write_to_testcase(mem, len);
-        new_fault = run_target(argv, hang_tmout);
-
-        /* A corner case that one user reported bumping into: increasing the
-           timeout actually uncovers a crash. Make sure we don't discard it if
-           so. */
-
-        if (!stop_soon && new_fault == FAULT_CRASH) goto keep_as_crash;
-
-        if (stop_soon || new_fault != FAULT_TMOUT) return keeping;
-
-      }
-
-#ifndef SIMPLE_FILES
-
-      fn = alloc_printf("%s/hangs/id:%06llu,%s", out_dir,
-                        unique_hangs, describe_op(0));
-
-#else
-
-      fn = alloc_printf("%s/hangs/id_%06llu", out_dir,
-                        unique_hangs);
-
-#endif /* ^!SIMPLE_FILES */
-
-      unique_hangs++;
-
-      last_hang_time = get_cur_time();
-
-      break;
-
-    case FAULT_CRASH:
-
-keep_as_crash:
-
-      /* This is handled in a manner roughly similar to timeouts,
-         except for slightly different limits and no need to re-run test
-         cases. */
-
-      total_crashes++;
-
-      if (unique_crashes >= KEEP_UNIQUE_CRASH) return keeping;
-
-      if (!dumb_mode) {
-
-#ifdef WORD_SIZE_64
-        simplify_trace((u64*)trace_bits);
-#else
-        simplify_trace((u32*)trace_bits);
-#endif /* ^WORD_SIZE_64 */
-
-        if (!has_new_bits(virgin_crash)) return keeping;
-
-      }
-
-      if (!unique_crashes) write_crash_readme();
-
-#ifndef SIMPLE_FILES
-
-      fn = alloc_printf("%s/crashes/id:%06llu,sig:%02u,%s", out_dir,
-                        unique_crashes, kill_signal, describe_op(0));
-
-#else
-
-      fn = alloc_printf("%s/crashes/id_%06llu_%02u", out_dir, unique_crashes,
-                        kill_signal);
-
-#endif /* ^!SIMPLE_FILES */
-
-      unique_crashes++;
-
-      last_crash_time = get_cur_time();
-      last_crash_execs = total_execs;
-
-      break;
-
-    case FAULT_ERROR: FATAL("Unable to execute target application");
-
-    default: return keeping;
-
-  }
-
-  /* If we're here, we apparently want to save the crash or hang
-     test case, too. */
-
-  fd = open(fn, O_WRONLY | O_CREAT | O_EXCL, 0600);
-  if (fd < 0) PFATAL("Unable to create '%s'", fn);
-  ck_write(fd, mem, len, fn);
-  close(fd);
-
-  ck_free(fn);
-
-  return keeping;
-
-}
-
-
-/* When resuming, try to find the queue position to start from. This makes sense
-   only when resuming, and when we can find the original fuzzer_stats. */
-
-static u32 find_start_position(void) {
-
-  static u8 tmp[4096]; /* Ought to be enough for anybody. */
-
-  u8  *fn, *off;
-  s32 fd, i;
-  u32 ret;
-
-  if (!resuming_fuzz) return 0;
-
-  if (in_place_resume) fn = alloc_printf("%s/fuzzer_stats", out_dir);
-  else fn = alloc_printf("%s/../fuzzer_stats", in_dir);
-
-  fd = open(fn, O_RDONLY);
-  ck_free(fn);
-
-  if (fd < 0) return 0;
-
-  i = read(fd, tmp, sizeof(tmp) - 1); (void)i; /* Ignore errors */
-  close(fd);
-
-  off = strstr(tmp, "cur_path          : ");
-  if (!off) return 0;
-
-  ret = atoi(off + 20);
-  if (ret >= queued_paths) ret = 0;
-  return ret;
 
 }
 
@@ -3825,43 +2890,11 @@ static double get_runnable_processes(void) {
 }
 
 
-/* Delete the temporary directory used for in-place session resume. */
-
-static void nuke_resume_dir(void) {
-
-  u8* fn;
-
-  fn = alloc_printf("%s/_resume/.state/deterministic_done", out_dir);
-  if (delete_files(fn, CASE_PREFIX)) goto dir_cleanup_failed;
-  ck_free(fn);
-
-  fn = alloc_printf("%s/_resume/.state/auto_extras", out_dir);
-  if (delete_files(fn, "auto_")) goto dir_cleanup_failed;
-  ck_free(fn);
-
-  fn = alloc_printf("%s/_resume/.state/redundant_edges", out_dir);
-  if (delete_files(fn, CASE_PREFIX)) goto dir_cleanup_failed;
-  ck_free(fn);
-
-  fn = alloc_printf("%s/_resume/.state/variable_behavior", out_dir);
-  if (delete_files(fn, CASE_PREFIX)) goto dir_cleanup_failed;
-  ck_free(fn);
-
-  fn = alloc_printf("%s/_resume/.state", out_dir);
-  if (rmdir(fn) && errno != ENOENT) goto dir_cleanup_failed;
-  ck_free(fn);
-
-  fn = alloc_printf("%s/_resume", out_dir);
-  if (delete_files(fn, CASE_PREFIX)) goto dir_cleanup_failed;
-  ck_free(fn);
-
-  return;
-
-dir_cleanup_failed:
-
-  FATAL("_resume directory cleanup failed");
-
-}
+#ifndef SIMPLE_FILES
+#  define CASE_PREFIX "id:"
+#else
+#  define CASE_PREFIX "id_"
+#endif /* ^!SIMPLE_FILES */
 
 
 /* Delete fuzzer output directory if we recognize it as ours, if the fuzzer
@@ -3996,7 +3029,7 @@ static void maybe_delete_out_dir(void) {
   ck_free(fn);
 
   fn = alloc_printf("%s/cache", out_dir);
-  if (delete_files(fn, CASE_PREFIX)) goto dir_cleanup_failed;
+  if (delete_files(fn, "id_")) goto dir_cleanup_failed;
   ck_free(fn);
 
   /* All right, let's do <out_dir>/crashes/id:* and <out_dir>/hangs/id:*. */
@@ -5371,24 +4404,26 @@ static struct queue_entry* request_seed(char** argv, u8* mutation_type, u8 rando
     u8 fault;
 
     seed_pinfo = new_packet(GET_SEED, seed, seed->size);
-    if(seed_pinfo == NULL) fatal("new_packet");
+    if (seed_pinfo == NULL) fatal("new_packet");
 
     ret = send_packet(sock_fd, seed_pinfo);
-    if(ret < 0) goto sock_err;
+    if (ret < 0) goto sock_err;
 
     free(seed_pinfo);
     
     seed_pinfo = recv_packet(sock_fd);
-    if(seed_pinfo == NULL) goto sock_err;
+    if (seed_pinfo == NULL) goto sock_err;
 
     seed = (seed_info_t*)packet_data(seed_pinfo);
-    if(seed == NULL) goto out_seed;
+    if (seed == NULL) goto out_seed;
 
     write_to_testcase(seed->content, seed->seed_len);
     fault = run_target(argv, exec_tmout);
+    if (fault == FAULT_ERROR)
+      FATAL("Unable to execute target application");
 
     seed_entry = save_seed(argv, seed->content, seed->seed_len, seed_id);
-    if(seed_entry == NULL) goto out_seed;
+    if (seed_entry == NULL) goto out_seed;
     
     queued_paths++;
 
@@ -6985,144 +6020,6 @@ abandon_entry:
 
   return ret_val;
 
-
-}
-
-
-/* Grab interesting test cases from other fuzzers. */
-
-static void sync_fuzzers(char** argv) {
-
-  DIR* sd;
-  struct dirent* sd_ent;
-  u32 sync_cnt = 0;
-
-  sd = opendir(sync_dir);
-  if (!sd) PFATAL("Unable to open '%s'", sync_dir);
-
-  stage_max = stage_cur = 0;
-  cur_depth = 0;
-
-  /* Look at the entries created for every other fuzzer in the sync directory. */
-
-  while ((sd_ent = readdir(sd))) {
-
-    static u8 stage_tmp[128];
-
-    DIR* qd;
-    struct dirent* qd_ent;
-    u8 *qd_path, *qd_synced_path;
-    u32 min_accept = 0, next_min_accept;
-
-    s32 id_fd;
-
-    /* Skip dot files and our own output directory. */
-
-    if (sd_ent->d_name[0] == '.' || !strcmp(sync_id, sd_ent->d_name)) continue;
-
-    /* Skip anything that doesn't have a queue/ subdirectory. */
-
-    qd_path = alloc_printf("%s/%s/queue", sync_dir, sd_ent->d_name);
-
-    if (!(qd = opendir(qd_path))) {
-      ck_free(qd_path);
-      continue;
-    }
-
-    /* Retrieve the ID of the last seen test case. */
-
-    qd_synced_path = alloc_printf("%s/.synced/%s", out_dir, sd_ent->d_name);
-
-    id_fd = open(qd_synced_path, O_RDWR | O_CREAT, 0600);
-
-    if (id_fd < 0) PFATAL("Unable to create '%s'", qd_synced_path);
-
-    if (read(id_fd, &min_accept, sizeof(u32)) > 0) 
-      lseek(id_fd, 0, SEEK_SET);
-
-    next_min_accept = min_accept;
-
-    /* Show stats */    
-
-    sprintf(stage_tmp, "sync %u", ++sync_cnt);
-    stage_name = stage_tmp;
-    stage_cur  = 0;
-    stage_max  = 0;
-
-    /* For every file queued by this fuzzer, parse ID and see if we have looked at
-       it before; exec a test case if not. */
-
-    while ((qd_ent = readdir(qd))) {
-
-      u8* path;
-      s32 fd;
-      struct stat st;
-
-      if (qd_ent->d_name[0] == '.' ||
-          sscanf(qd_ent->d_name, CASE_PREFIX "%06u", &syncing_case) != 1 || 
-          syncing_case < min_accept) continue;
-
-      /* OK, sounds like a new one. Let's give it a try. */
-
-      if (syncing_case >= next_min_accept)
-        next_min_accept = syncing_case + 1;
-
-      path = alloc_printf("%s/%s", qd_path, qd_ent->d_name);
-
-      /* Allow this to fail in case the other fuzzer is resuming or so... */
-
-      fd = open(path, O_RDONLY);
-
-      if (fd < 0) {
-         ck_free(path);
-         continue;
-      }
-
-      if (fstat(fd, &st)) PFATAL("fstat() failed");
-
-      /* Ignore zero-sized or oversized files. */
-
-      if (st.st_size && st.st_size <= MAX_FILE) {
-
-        u8  fault;
-        u8* mem = mmap(0, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-
-        if (mem == MAP_FAILED) PFATAL("Unable to mmap '%s'", path);
-
-        /* See what happens. We rely on save_if_interesting() to catch major
-           errors and save the test case. */
-
-        write_to_testcase(mem, st.st_size);
-
-        fault = run_target(argv, exec_tmout);
-
-        if (stop_soon) return;
-
-        syncing_party = sd_ent->d_name;
-        queued_imported += save_if_interesting(argv, mem, st.st_size, fault);
-        syncing_party = 0;
-
-        munmap(mem, st.st_size);
-
-        if (!(stage_cur++ % stats_update_freq)) show_stats();
-
-      }
-
-      ck_free(path);
-      close(fd);
-
-    }
-
-    ck_write(id_fd, &next_min_accept, sizeof(u32), qd_synced_path);
-
-    close(id_fd);
-    closedir(qd);
-    ck_free(qd_path);
-    ck_free(qd_synced_path);
-    
-  }  
-
-  closedir(sd);
 
 }
 
