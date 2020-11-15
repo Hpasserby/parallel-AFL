@@ -99,8 +99,7 @@
 
 #define CACHE_MAX 2048
 
-EXP_ST u8 *in_dir,                    /* Input directory with test cases  */
-          *out_file,                  /* File to fuzz, if any             */
+EXP_ST u8 *out_file,                  /* File to fuzz, if any             */
           *out_dir,                   /* Working & output directory       */
           *sync_dir,                  /* Synchronization directory        */
           *sync_id,                   /* Fuzzer ID                        */
@@ -118,7 +117,6 @@ EXP_ST u64 mem_limit  = MEM_LIMIT;    /* Memory cap for child (MB)        */
 static u32 stats_update_freq = 1;     /* Stats update frequency (execs)   */
 
 EXP_ST u8  skip_deterministic,        /* Skip deterministic stages?       */
-           force_deterministic,       /* Force deterministic stages?      */
            use_splicing,              /* Recombine input files?           */
            dumb_mode,                 /* Run in non-instrumented mode?    */
            score_changed,             /* Scoring for favorites changed?   */
@@ -130,7 +128,6 @@ EXP_ST u8  skip_deterministic,        /* Skip deterministic stages?       */
            uses_asan,                 /* Target uses ASAN?                */
            no_forkserver,             /* Disable forkserver?              */
            crash_mode,                /* Crash mode! Yeah!                */
-           in_place_resume,           /* Attempt in-place resume?         */
            auto_changed,              /* Auto-generated tokens changed?   */
            no_cpu_meter_red,          /* Feng shui on the status screen   */
            no_arith,                  /* Skip most arithmetic ops         */
@@ -209,8 +206,6 @@ static u8 *stage_name = "init",       /* Name of the current fuzz stage   */
           *stage_short;               /* Short stage name                 */
 
 static s32 stage_cur, stage_max;      /* Stage progression                */
-
-static u32 master_id, master_max;     /* Master instance job splitting    */
 
 static s32 stage_cur_byte,            /* Byte offset of current stage op  */
            stage_cur_val;             /* Value used for stage op          */
@@ -295,6 +290,8 @@ static s32 interesting_32[] = { INTERESTING_8, INTERESTING_16, INTERESTING_32 };
 
 /* 连接fuzz服务器 */
 static int sock_fd;
+static char* ip;
+static uint32_t port;
 
 /* 种子缓存表 从seed_id映射到queue_entry */
 typedef struct seed_cache_entry {
@@ -1718,49 +1715,6 @@ static void save_auto(void) {
 }
 
 
-/* Load automatically generated extras. */
-
-static void load_auto(void) {
-
-  u32 i;
-
-  for (i = 0; i < USE_AUTO_EXTRAS; i++) {
-
-    u8  tmp[MAX_AUTO_EXTRA + 1];
-    u8* fn = alloc_printf("%s/.state/auto_extras/auto_%06u", in_dir, i);
-    s32 fd, len;
-
-    fd = open(fn, O_RDONLY, 0600);
-
-    if (fd < 0) {
-
-      if (errno != ENOENT) PFATAL("Unable to open '%s'", fn);
-      ck_free(fn);
-      break;
-
-    }
-
-    /* We read one byte more to cheaply detect tokens that are too
-       long (and skip them). */
-
-    len = read(fd, tmp, MAX_AUTO_EXTRA + 1);
-
-    if (len < 0) PFATAL("Unable to read from '%s'", fn);
-
-    if (len >= MIN_AUTO_EXTRA && len <= MAX_AUTO_EXTRA)
-      maybe_add_auto(tmp, len);
-
-    close(fd);
-    ck_free(fn);
-
-  }
-
-  if (i) OKF("Loaded %u auto-discovered dictionary tokens.", i);
-  else OKF("No auto-generated dictionary tokens to reuse.");
-
-}
-
-
 /* Destroy extras. */
 
 static void destroy_extras(void) {
@@ -2644,8 +2598,7 @@ static void find_timeout(void) {
 
   if (!resuming_fuzz) return;
 
-  if (in_place_resume) fn = alloc_printf("%s/fuzzer_stats", out_dir);
-  else fn = alloc_printf("%s/../fuzzer_stats", in_dir);
+  fn = alloc_printf("%s/fuzzer_stats", out_dir);
 
   fd = open(fn, O_RDONLY);
   ck_free(fn);
@@ -2942,7 +2895,7 @@ static void maybe_delete_out_dir(void) {
 
     /* Let's see how much work is at stake. */
 
-    if (!in_place_resume && last_update - start_time > OUTPUT_GRACE * 60) {
+    if (last_update - start_time > OUTPUT_GRACE * 60) {
 
       SAYF("\n" cLRD "[-] " cRST
            "The job output directory already exists and contains the results of more\n"
@@ -2968,36 +2921,16 @@ static void maybe_delete_out_dir(void) {
      incomplete due to an earlier abort, so we want to use the old _resume/
      dir instead, and we let rename() fail silently. */
 
-  if (in_place_resume) {
-
-    u8* orig_q = alloc_printf("%s/queue", out_dir);
-
-    in_dir = alloc_printf("%s/_resume", out_dir);
-
-    rename(orig_q, in_dir); /* Ignore errors */
-
-    OKF("Output directory exists, will attempt session resume.");
-
-    ck_free(orig_q);
-
-  } else {
-
-    OKF("Output directory exists but deemed OK to reuse.");
-
-  }
+  OKF("Output directory exists but deemed OK to reuse.");
 
   ACTF("Deleting old session data...");
 
   /* Okay, let's get the ball rolling! First, we need to get rid of the entries
      in <out_dir>/.synced/.../id:*, if any are present. */
 
-  if (!in_place_resume) {
-
-    fn = alloc_printf("%s/.synced", out_dir);
-    if (delete_files(fn, NULL)) goto dir_cleanup_failed;
-    ck_free(fn);
-
-  }
+  fn = alloc_printf("%s/.synced", out_dir);
+  if (delete_files(fn, NULL)) goto dir_cleanup_failed;
+  ck_free(fn);
 
   /* Next, we need to clean up <out_dir>/queue/.state/ subdirectories: */
 
@@ -3034,73 +2967,19 @@ static void maybe_delete_out_dir(void) {
 
   /* All right, let's do <out_dir>/crashes/id:* and <out_dir>/hangs/id:*. */
 
-  if (!in_place_resume) {
-
-    fn = alloc_printf("%s/crashes/README.txt", out_dir);
-    unlink(fn); /* Ignore errors */
-    ck_free(fn);
-
-  }
+  fn = alloc_printf("%s/crashes/README.txt", out_dir);
+  unlink(fn); /* Ignore errors */
+  ck_free(fn);
 
   fn = alloc_printf("%s/crashes", out_dir);
 
   /* Make backup of the crashes directory if it's not empty and if we're
      doing in-place resume. */
 
-  if (in_place_resume && rmdir(fn)) {
-
-    time_t cur_t = time(0);
-    struct tm* t = localtime(&cur_t);
-
-#ifndef SIMPLE_FILES
-
-    u8* nfn = alloc_printf("%s.%04u-%02u-%02u-%02u:%02u:%02u", fn,
-                           t->tm_year + 1900, t->tm_mon + 1, t->tm_mday,
-                           t->tm_hour, t->tm_min, t->tm_sec);
-
-#else
-
-    u8* nfn = alloc_printf("%s_%04u%02u%02u%02u%02u%02u", fn,
-                           t->tm_year + 1900, t->tm_mon + 1, t->tm_mday,
-                           t->tm_hour, t->tm_min, t->tm_sec);
-
-#endif /* ^!SIMPLE_FILES */
-
-    rename(fn, nfn); /* Ignore errors. */
-    ck_free(nfn);
-
-  }
-
   if (delete_files(fn, CASE_PREFIX)) goto dir_cleanup_failed;
   ck_free(fn);
 
   fn = alloc_printf("%s/hangs", out_dir);
-
-  /* Backup hangs, too. */
-
-  if (in_place_resume && rmdir(fn)) {
-
-    time_t cur_t = time(0);
-    struct tm* t = localtime(&cur_t);
-
-#ifndef SIMPLE_FILES
-
-    u8* nfn = alloc_printf("%s.%04u-%02u-%02u-%02u:%02u:%02u", fn,
-                           t->tm_year + 1900, t->tm_mon + 1, t->tm_mday,
-                           t->tm_hour, t->tm_min, t->tm_sec);
-
-#else
-
-    u8* nfn = alloc_printf("%s_%04u%02u%02u%02u%02u%02u", fn,
-                           t->tm_year + 1900, t->tm_mon + 1, t->tm_mday,
-                           t->tm_hour, t->tm_min, t->tm_sec);
-
-#endif /* ^!SIMPLE_FILES */
-
-    rename(fn, nfn); /* Ignore errors. */
-    ck_free(nfn);
-
-  }
 
   if (delete_files(fn, CASE_PREFIX)) goto dir_cleanup_failed;
   ck_free(fn);
@@ -3115,11 +2994,9 @@ static void maybe_delete_out_dir(void) {
   if (unlink(fn) && errno != ENOENT) goto dir_cleanup_failed;
   ck_free(fn);
 
-  if (!in_place_resume) {
-    fn  = alloc_printf("%s/fuzzer_stats", out_dir);
-    if (unlink(fn) && errno != ENOENT) goto dir_cleanup_failed;
-    ck_free(fn);
-  }
+  fn  = alloc_printf("%s/fuzzer_stats", out_dir);
+  if (unlink(fn) && errno != ENOENT) goto dir_cleanup_failed;
+  ck_free(fn);
 
   fn = alloc_printf("%s/plot_data", out_dir);
   if (unlink(fn) && errno != ENOENT) goto dir_cleanup_failed;
@@ -4220,7 +4097,7 @@ static u8 could_be_interest(u32 old_val, u32 new_val, u8 blen, u8 check_le) {
 
 static int initialize_client() {
 
-  sock_fd = get_tcp_client("127.0.0.1", 8888);
+  sock_fd = get_tcp_client(ip, port);
   if (sock_fd < 0)
     fatal("[-] get_tcp_client");
 
@@ -4424,8 +4301,6 @@ static struct queue_entry* request_seed(char** argv, u8* mutation_type, u8 rando
 
     seed_entry = save_seed(argv, seed->content, seed->seed_len, seed_id);
     if (seed_entry == NULL) goto out_seed;
-    
-    queued_paths++;
 
   }
   
@@ -6363,9 +6238,6 @@ EXP_ST void setup_dirs_fds(void) {
 
   } else {
 
-    if (in_place_resume)
-      FATAL("Resume attempted but old output directory not found");
-
     out_dir_fd = open(out_dir, O_RDONLY);
 
 #ifndef __sun
@@ -6419,19 +6291,6 @@ EXP_ST void setup_dirs_fds(void) {
   tmp = alloc_printf("%s/queue/.state/variable_behavior/", out_dir);
   if (mkdir(tmp, 0700)) PFATAL("Unable to create '%s'", tmp);
   ck_free(tmp);
-
-  /* Sync directory for keeping track of cooperating fuzzers. */
-
-  if (sync_id) {
-
-    tmp = alloc_printf("%s/.synced/", out_dir);
-
-    if (mkdir(tmp, 0700) && (!in_place_resume || errno != EEXIST))
-      PFATAL("Unable to create '%s'", tmp);
-
-    ck_free(tmp);
-
-  }
 
   /* All recorded crashes. */
 
@@ -6697,48 +6556,6 @@ static void get_core_count(void) {
 }
 
 
-/* Validate and fix up out_dir and sync_dir when using -S. */
-
-static void fix_up_sync(void) {
-
-  u8* x = sync_id;
-
-  if (dumb_mode)
-    FATAL("-S / -M and -n are mutually exclusive");
-
-  if (skip_deterministic) {
-
-    if (force_deterministic)
-      FATAL("use -S instead of -M -d");
-    else
-      FATAL("-S already implies -d");
-
-  }
-
-  while (*x) {
-
-    if (!isalnum(*x) && *x != '_' && *x != '-')
-      FATAL("Non-alphanumeric fuzzer ID specified via -S or -M");
-
-    x++;
-
-  }
-
-  if (strlen(sync_id) > 32) FATAL("Fuzzer ID too long");
-
-  x = alloc_printf("%s/%s", out_dir, sync_id);
-
-  sync_dir = out_dir;
-  out_dir  = x;
-
-  if (!force_deterministic) {
-    skip_deterministic = 1;
-    use_splicing = 1;
-  }
-
-}
-
-
 /* Handle screen resize (SIGWINCH). */
 
 static void handle_resize(int sig) {
@@ -6992,52 +6809,14 @@ int main(int argc, char** argv) {
   gettimeofday(&tv, &tz);
   srandom(tv.tv_sec ^ tv.tv_usec ^ getpid());
 
-  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:Q")) > 0)
+  while ((opt = getopt(argc, argv, "+o:f:m:t:T:nCB:x:h:p:Q")) > 0)
 
     switch (opt) {
-
-      case 'i': /* input dir */
-
-        if (in_dir) FATAL("Multiple -i options not supported");
-        in_dir = optarg;
-
-        if (!strcmp(in_dir, "-")) in_place_resume = 1;
-
-        break;
 
       case 'o': /* output dir */
 
         if (out_dir) FATAL("Multiple -o options not supported");
         out_dir = optarg;
-        break;
-
-      case 'M': { /* master sync ID */
-
-          u8* c;
-
-          if (sync_id) FATAL("Multiple -S or -M options not supported");
-          sync_id = ck_strdup(optarg);
-
-          if ((c = strchr(sync_id, ':'))) {
-
-            *c = 0;
-
-            if (sscanf(c + 1, "%u/%u", &master_id, &master_max) != 2 ||
-                !master_id || !master_max || master_id > master_max ||
-                master_max > 1000000) FATAL("Bogus master ID passed to -M");
-
-          }
-
-          force_deterministic = 1;
-
-        }
-
-        break;
-
-      case 'S': 
-
-        if (sync_id) FATAL("Multiple -S or -M options not supported");
-        sync_id = ck_strdup(optarg);
         break;
 
       case 'f': /* target file */
@@ -7106,13 +6885,6 @@ int main(int argc, char** argv) {
 
         break;
 
-      case 'd': /* skip deterministic */
-
-        if (skip_deterministic) FATAL("Multiple -d options not supported");
-        skip_deterministic = 1;
-        use_splicing = 1;
-        break;
-
       case 'B': /* load bitmap */
 
         /* This is a secret undocumented option! It is useful if you find
@@ -7160,21 +6932,27 @@ int main(int argc, char** argv) {
 
         break;
 
+      case 'h':
+        
+        if(ip) FATAL("Multiple -h options not supported");
+        ip = optarg;
+        break;
+    
+      case 'p':
+        if(port) FATAL("Multiple -p option not supported");
+        port = atoi(optarg);
+        break;
+
       default:
 
         usage(argv[0]);
 
     }
 
-  if (optind == argc || !in_dir || !out_dir) usage(argv[0]);
+  if (optind == argc || !out_dir || !ip || !port) usage(argv[0]);
 
   setup_signal_handlers();
   check_asan_opts();
-
-  if (sync_id) fix_up_sync();
-
-  if (!strcmp(in_dir, out_dir))
-    FATAL("Input and output directories can't be the same");
 
   if (dumb_mode) {
 
@@ -7225,7 +7003,6 @@ int main(int argc, char** argv) {
   init_count_class16();
 
   setup_dirs_fds();
-  load_auto();
 
   if (extras_dir) load_extras(extras_dir);
 
