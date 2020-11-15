@@ -143,13 +143,14 @@ tcp_socket_info* get_tcp_socket(const char *ip, uint32_t port) {
   if(si == NULL)
     return NULL;
 
-  if(ip == NULL)
-    ip = "0.0.0.0";
-
   memset(si, 0, sizeof(tcp_socket_info));
   si->sock_addr.sin_family       = AF_INET;
   si->sock_addr.sin_port         = htons(port);
-  si->sock_addr.sin_addr.s_addr  = inet_addr(ip);
+
+  if(ip == NULL)
+    si->sock_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+  else
+    si->sock_addr.sin_addr.s_addr = inet_addr(ip);
   
   si->sock_len = sizeof(si->sock_addr);
   
@@ -171,12 +172,12 @@ tcp_socket_info* get_tcp_socket(const char *ip, uint32_t port) {
  * port   - 监听的端口号
  */
 
-int get_tcp_server(const char *ip, uint32_t port) {
+int get_tcp_server(uint32_t port) {
   
   int ret = -1, on = 1;
   tcp_socket_info* si;
 
-  si = get_tcp_socket(ip, port);
+  si = get_tcp_socket(NULL, port);
   if(si == NULL)
     goto out;
 

@@ -49,7 +49,7 @@ typedef struct tcp_socket_info {
 }tcp_socket_info;
 
 tcp_socket_info* get_tcp_socket(const char *ip, uint32_t port);
-int get_tcp_server(const char *ip, uint32_t port);
+int get_tcp_server(uint32_t port);
 int get_tcp_client(const char *ip, uint32_t port);
 
 packet_info_t* new_packet(uint32_t cmd, void *data, size_t data_len);
