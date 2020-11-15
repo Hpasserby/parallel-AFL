@@ -3016,7 +3016,7 @@ static void pivot_inputs(void) {
 
     /* Make sure that the passed_det value carries over, too. */
 
-    if (!q->doing_det) mark_as_det_done(q);
+    if (q->doing_det == M_HAVOC) mark_as_det_done(q);
 
     q = q->next;
     id++;
@@ -3907,6 +3907,8 @@ static void show_stats(void) {
 
   cur_ms = get_cur_time();
 
+  if (!queue_cur) return;
+
   /* If not enough time has passed since last UI update, bail out. */
 
   if (cur_ms - last_ms < 1000 / UI_TARGET_HZ) return;
@@ -4665,8 +4667,6 @@ static int handle_put_seed(char** argv, packet_info_t *pinfo) {
   pthread_mutex_unlock(&seed_queue_mutex);
   pthread_mutex_unlock(&seed_exec_mutex);
 
-  printf("[+] receive PUT_SEED request\n");
-
   return 0;
 
 }
@@ -4700,9 +4700,6 @@ static int handle_get_task(int cfd, packet_info_t *pinfo) {
   seed->seed_len = seed_entry->len;
   seed->size = seed_size;
   strcpy(seed->content, fname);
-
-  printf("[+] seed name: %s\n", fname);
-  printf("[+] seed stage: %d\n", seed->flag);
 
   resp = new_packet(GET_TASK, seed, seed->size);
   if (resp == NULL) 
@@ -4783,13 +4780,19 @@ static int handle_sync_bitmap(int cfd, packet_info_t *pinfo) {
 
   bitmap = (u8*)packet_data(pinfo);
 
+  i = MAP_SIZE >> 3;
+
   current = (u64*)bitmap;
   virgin = (u64*)virgin_bits;
 
   pthread_mutex_lock(&bitmap_mutex);
 
   if(bitmap != NULL)
-    while (i--) *virgin &= *current;
+    while (i--) {
+      *virgin &= *current;
+      virgin++;
+      current++;
+    }
 
   resp = new_packet(SYNC_BITMAP, virgin_bits, MAP_SIZE);
   if(resp == NULL)
@@ -4801,7 +4804,6 @@ static int handle_sync_bitmap(int cfd, packet_info_t *pinfo) {
   if(ret < 0)
     close(cfd);
 
-  printf("[+] receive SYNC_BITMAP request\n");
   return 0;
 
 }
