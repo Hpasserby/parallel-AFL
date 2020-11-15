@@ -735,25 +735,6 @@ static void mark_as_variable(struct queue_entry* q) {
 }
 
 
-/* Destroy the entire queue. */
-
-EXP_ST void destroy_queue(void) {
-
-  struct queue_entry *q = queue, *n;
-
-  while (q) {
-
-    n = q->next;
-    ck_free(q->fname);
-    ck_free(q->trace_mini);
-    ck_free(q);
-    q = n;
-
-  }
-
-}
-
-
 /* Write bitmap to file. The bitmap is useful mostly for the secret
    -B option, to focus a separate fuzzing session on a particular
    interesting input without rediscovering all the others. */
@@ -4102,12 +4083,34 @@ static int initialize_client() {
     fatal("[-] get_tcp_client");
 
   task_queue = new_queue(/*nonblock*/0, 0);
-  if(task_queue == NULL)
+  if (task_queue == NULL)
     fatal("[-] new_queue");
 
   memset(seed_cache, 0, sizeof(seed_cache));
 
   return 0;
+}
+
+
+static void clear_cache() {
+
+  int i;
+  struct queue_entry *tmp;
+
+  for (i = 0; i < CACHE_MAX; i++)
+
+    if (seed_cache[i].seed_info) {
+
+      tmp = seed_cache[i].seed_info;
+      ck_free(tmp->fname);
+      if(tmp->tc_ref)
+        ck_free(tmp->trace_mini);
+      ck_free(tmp);
+
+      seed_cache[i].seed_info = 0;
+
+    }
+
 }
 
 
@@ -4121,7 +4124,7 @@ static struct queue_entry* search_cache(s32 id) {
 
   for (off = 0; off < CACHE_MAX; off++) {
 
-    if (seed_cache[index].seed_id == id)
+    if (seed_cache[index].seed_id == id && seed_cache[index].seed_info)
       return seed_cache[index].seed_info;
     index++;
 
@@ -4202,7 +4205,7 @@ static struct queue_entry* save_seed(char** argv, void *mem, u32 len, uint32_t i
   u8 res;
   u8* fn = "";
   s32 fd;
-  struct queue_entry *seed_entry;
+  struct queue_entry *seed_entry = NULL;
 
   fn = alloc_printf("%s/cache/id_%06u", out_dir, queued_paths);
   
@@ -4233,8 +4236,8 @@ static struct queue_entry* save_seed(char** argv, void *mem, u32 len, uint32_t i
   return seed_entry;
 
 out_err:
-  free(fn);
-  free(seed_entry);
+  ck_free(fn);
+  ck_free(seed_entry);
   return NULL;
 
 }
@@ -7095,12 +7098,13 @@ stop_fuzzing:
   }
 
   close(sock_fd);
+  clear_cache();
 
   fclose(plot_file);
-  destroy_queue();
   destroy_extras();
   ck_free(target_path);
   ck_free(sync_id);
+  ck_free(orig_cmdline);
 
   alloc_report();
 

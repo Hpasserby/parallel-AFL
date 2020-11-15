@@ -4801,6 +4801,7 @@ static int handle_sync_bitmap(int cfd, packet_info_t *pinfo) {
   if(ret < 0)
     close(cfd);
 
+  free(resp);
   return 0;
 
 }
@@ -5004,11 +5005,11 @@ static int start_server_loop(char** argv, int listen_fd) {
 
         client_fd = event_array[i].data.fd;
         handle_request(argv, client_fd);
-
       }
     }
   }
 
+  free(event_array);
   return 0;
 
 }
@@ -6215,6 +6216,7 @@ stop_fuzzing:
   destroy_extras();
   ck_free(target_path);
   ck_free(sync_id);
+  ck_free(orig_cmdline);
 
   alloc_report();
 
