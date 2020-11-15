@@ -316,6 +316,8 @@ static seed_cache_entry_t seed_cache[CACHE_MAX];
 /* fuzz任务队列 */
 static queue_t *task_queue;
 
+static u32 last_id;
+
 /* Fuzzing stages */
 
 enum {
@@ -986,7 +988,8 @@ recheck:
 
     if (unlikely(*current) && unlikely(*current & *virgin)) {
 
-      if(!done_sync) {
+      /* 若发现了新bit 先同步一次再看看 */
+      if(!done_sync && virgin_map == virgin_bits) {
 
         sync_bitmap();
         done_sync = 1;
@@ -3218,7 +3221,7 @@ static void write_crash_readme(void) {
 }
 
 
-static u8 upload_if_interesting(void* mem, u32 len, u8 fault) {
+static u8 upload_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
 
   s32 ret;
   u8  hnb;
@@ -3232,23 +3235,86 @@ static u8 upload_if_interesting(void* mem, u32 len, u8 fault) {
       return 0;
     }
 
+    goto do_upload;
+
   }
 
   switch (fault) {
 
     case FAULT_TMOUT:
-      break;
+      
+      total_tmouts++;
+      
+      if (!dumb_mode) {
 
+#ifdef WORD_SIZE_64
+        simplify_trace((u64*)trace_bits);
+#else
+        simplify_trace((u32*)trace_bits);
+#endif /* ^WORD_SIZE_64 */
+
+        if (!has_new_bits(virgin_tmout)) return 0;
+
+      }
+      
+      unique_tmouts++;
+
+      if (exec_tmout < hang_tmout) {
+
+        u8 new_fault;
+        write_to_testcase(mem, len);
+        new_fault = run_target(argv, hang_tmout);
+
+        /* A corner case that one user reported bumping into: increasing the
+           timeout actually uncovers a crash. Make sure we don't discard it if
+           so. */
+
+        if (!stop_soon && new_fault == FAULT_CRASH) goto keep_as_crash;
+
+        if (stop_soon || new_fault != FAULT_TMOUT) return 0;
+
+      }
+
+      unique_hangs++;
+
+      last_hang_time = get_cur_time();
+      
+      break;
+    
     case FAULT_CRASH:
+
+keep_as_crash:
+
+      total_crashes++;
+
+      if (!dumb_mode) {
+
+#ifdef WORD_SIZE_64
+        simplify_trace((u64*)trace_bits);
+#else
+        simplify_trace((u32*)trace_bits);
+#endif /* ^WORD_SIZE_64 */
+
+        if (!has_new_bits(virgin_crash)) return 0;
+
+        unique_crashes++;
+        
+        last_crash_time = get_cur_time();
+        last_crash_execs = total_execs;
+
+      }
+
       break;
 
     case FAULT_ERROR:
       FATAL("Unable to execute target application");
-    
+
     default:
       return 0; 
 
   }
+
+do_upload:
 
   seed_info = (seed_info_t*)malloc(sizeof(seed_info_t) + len);
   if(seed_info == NULL)
@@ -3926,6 +3992,10 @@ static void maybe_delete_out_dir(void) {
   ck_free(fn);
 
   fn = alloc_printf("%s/queue", out_dir);
+  if (delete_files(fn, CASE_PREFIX)) goto dir_cleanup_failed;
+  ck_free(fn);
+
+  fn = alloc_printf("%s/cache", out_dir);
   if (delete_files(fn, CASE_PREFIX)) goto dir_cleanup_failed;
   ck_free(fn);
 
@@ -4805,7 +4875,7 @@ EXP_ST u8 common_fuzz_stuff(char** argv, u8* out_buf, u32 len) {
 
   /* This handles FAULT_ERROR for us: */
 
-  queued_discovered += upload_if_interesting(out_buf, len, fault);
+  queued_discovered += upload_if_interesting(argv, out_buf, len, fault);
 
   if (!(stage_cur % stats_update_freq) || stage_cur + 1 == stage_max)
     show_stats();
@@ -5268,7 +5338,7 @@ out_err:
 static struct queue_entry* request_seed(char** argv, u8* mutation_type, u8 random) {
 
   int ret, seed_id, need_cache = 1;
-  packet_info_t *task_pinfo, *seed_pinfo;
+  packet_info_t *task_pinfo, *seed_pinfo = NULL;
   seed_info_t *seed;
   struct queue_entry* seed_entry = NULL;
 
@@ -5288,7 +5358,7 @@ static struct queue_entry* request_seed(char** argv, u8* mutation_type, u8 rando
   if (task_pinfo == NULL) goto sock_err;
 
   seed = (seed_info_t*)packet_data(task_pinfo);
-  if (seed == NULL) goto out;
+  if (seed == NULL) goto out_task;
 
   seed_id = get_seed_id(seed->content);
   
@@ -5312,13 +5382,13 @@ static struct queue_entry* request_seed(char** argv, u8* mutation_type, u8 rando
     if(seed_pinfo == NULL) goto sock_err;
 
     seed = (seed_info_t*)packet_data(seed_pinfo);
-    if(seed == NULL) goto out;
+    if(seed == NULL) goto out_seed;
 
     write_to_testcase(seed->content, seed->seed_len);
     fault = run_target(argv, exec_tmout);
 
     seed_entry = save_seed(argv, seed->content, seed->seed_len, seed_id);
-    if(seed_entry == NULL) goto out;
+    if(seed_entry == NULL) goto out_seed;
     
     queued_paths++;
 
@@ -5326,15 +5396,20 @@ static struct queue_entry* request_seed(char** argv, u8* mutation_type, u8 rando
   
   *mutation_type = seed->flag;
 
-  if(!random)
+  if(!random) {
     current_entry = seed_id;
+    if (seed_id < last_id) {
+      queue_cycle++;
+    }
+    last_id = seed_id;
+  }
   else if(random && current_entry == seed_id)
     seed_entry = NULL;
   
-out:
-
+out_seed:
+  if(seed_pinfo) free(seed_pinfo);
+out_task:
   free(task_pinfo);
-  free(seed_pinfo);
   return seed_entry;
 
 sock_err:
@@ -8253,10 +8328,7 @@ int main(int argc, char** argv) {
   init_count_class16();
 
   setup_dirs_fds();
-  read_testcases();
   load_auto();
-
-  pivot_inputs();
 
   if (extras_dir) load_extras(extras_dir);
 
@@ -8275,9 +8347,8 @@ int main(int argc, char** argv) {
   else
     use_argv = argv + optind;
 
-  perform_dry_run(use_argv);
-
-  cull_queue();
+  if (dumb_mode != 1 && !no_forkserver && !forksrv_pid)
+    init_forkserver(use_argv);
 
   show_init_stats();
 
@@ -8295,6 +8366,8 @@ int main(int argc, char** argv) {
     start_time += 4000;
     if (stop_soon) goto stop_fuzzing;
   }
+
+  queue_cycle = 1;
 
   while (1) {
 
