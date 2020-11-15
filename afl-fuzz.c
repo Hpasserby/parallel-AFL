@@ -98,6 +98,7 @@
    really makes no sense to haul them around as function parameters. */
 
 #define CACHE_MAX 2048
+#define HASH_KEY 17
 
 EXP_ST u8 *out_file,                  /* File to fuzz, if any             */
           *out_dir,                   /* Working & output directory       */
@@ -302,9 +303,6 @@ typedef struct seed_cache_entry {
 } seed_cache_entry_t;
 
 static seed_cache_entry_t seed_cache[CACHE_MAX];
-
-/* fuzz任务队列 */
-static queue_t *task_queue;
 
 static u32 last_id;
 
@@ -4082,10 +4080,6 @@ static int initialize_client() {
   if (sock_fd < 0)
     fatal("[-] get_tcp_client");
 
-  task_queue = new_queue(/*nonblock*/0, 0);
-  if (task_queue == NULL)
-    fatal("[-] new_queue");
-
   memset(seed_cache, 0, sizeof(seed_cache));
 
   return 0;
@@ -4120,7 +4114,7 @@ static struct queue_entry* search_cache(s32 id) {
 
   int off, index;
 
-  index = id % CACHE_MAX;
+  index = (id * HASH_KEY) % CACHE_MAX;
 
   for (off = 0; off < CACHE_MAX; off++) {
 
@@ -4141,7 +4135,7 @@ static void add_cache(s32 id, struct queue_entry* seed_info) {
   int off, index;
   u8 *fn;
 
-  index = id % CACHE_MAX;
+  index = (id * HASH_KEY) % CACHE_MAX;
   
   for (off = 0; off < CACHE_MAX; off++) {
 
