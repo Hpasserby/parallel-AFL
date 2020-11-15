@@ -6187,8 +6187,9 @@ static void usage(u8* argv0) {
 
        "Required parameters:\n\n"
 
-       "  -i dir        - input directory with test cases\n"
-       "  -o dir        - output directory for fuzzer findings\n\n"
+       "  -o dir        - output directory for fuzzer findings\n"
+       "  -h host       - fuzz服务端监听的IP地址\n"
+       "  -p port       - fuzz服务端监听的端口\n\n"
 
        "Execution control settings:\n\n"
 

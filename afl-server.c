@@ -106,7 +106,6 @@
 EXP_ST u8 *in_dir,                    /* Input directory with test cases  */
           *out_file,                  /* File to fuzz, if any             */
           *out_dir,                   /* Working & output directory       */
-          *sync_dir,                  /* Synchronization directory        */
           *sync_id,                   /* Fuzzer ID                        */
           *use_banner,                /* Display banner                   */
           *in_bitmap,                 /* Input bitmap                     */
@@ -122,7 +121,6 @@ EXP_ST u64 mem_limit  = MEM_LIMIT;    /* Memory cap for child (MB)        */
 static u32 stats_update_freq = 1;     /* Stats update frequency (execs)   */
 
 EXP_ST u8  skip_deterministic,        /* Skip deterministic stages?       */
-           force_deterministic,       /* Force deterministic stages?      */
            use_splicing,              /* Recombine input files?           */
            dumb_mode,                 /* Run in non-instrumented mode?    */
            score_changed,             /* Scoring for favorites changed?   */
@@ -215,8 +213,6 @@ static u8 *stage_name = "init",       /* Name of the current fuzz stage   */
 
 static s32 stage_cur, stage_max;      /* Stage progression                */
 static s32 splicing_with = -1;        /* Splicing with which test case?   */
-
-static u32 master_id, master_max;     /* Master instance job splitting    */
 
 static u32 syncing_case;              /* Syncing with case #...           */
 
@@ -322,6 +318,9 @@ static pthread_mutex_t seed_queue_mutex;
 static pthread_mutex_t bitmap_mutex;
 /* 执行种子互斥锁 */
 static pthread_mutex_t seed_exec_mutex; 
+
+/* 监听端口 */
+static uint32_t port;
 
 static u32 seek_to;
 static u64 prev_queued;
@@ -4932,7 +4931,7 @@ static int initialize_server() {
   pthread_mutex_init(&seed_queue_mutex, NULL);
   pthread_mutex_init(&bitmap_mutex, NULL);
 
-  listen_fd = get_tcp_server(8888);
+  listen_fd = get_tcp_server(port);
   if (listen_fd < 0)
     fatal("[-] get_tcp_server");
 
@@ -5304,7 +5303,8 @@ static void usage(u8* argv0) {
        "Required parameters:\n\n"
 
        "  -i dir        - input directory with test cases\n"
-       "  -o dir        - output directory for fuzzer findings\n\n"
+       "  -o dir        - output directory for fuzzer findings\n"
+       "  -p port       - 服务监听端口\n\n"
 
        "Execution control settings:\n\n"
 
@@ -5402,19 +5402,6 @@ EXP_ST void setup_dirs_fds(void) {
   tmp = alloc_printf("%s/queue/.state/variable_behavior/", out_dir);
   if (mkdir(tmp, 0700)) PFATAL("Unable to create '%s'", tmp);
   ck_free(tmp);
-
-  /* Sync directory for keeping track of cooperating fuzzers. */
-
-  if (sync_id) {
-
-    tmp = alloc_printf("%s/.synced/", out_dir);
-
-    if (mkdir(tmp, 0700) && (!in_place_resume || errno != EEXIST))
-      PFATAL("Unable to create '%s'", tmp);
-
-    ck_free(tmp);
-
-  }
 
   /* All recorded crashes. */
 
@@ -5680,48 +5667,6 @@ static void get_core_count(void) {
 }
 
 
-/* Validate and fix up out_dir and sync_dir when using -S. */
-
-static void fix_up_sync(void) {
-
-  u8* x = sync_id;
-
-  if (dumb_mode)
-    FATAL("-S / -M and -n are mutually exclusive");
-
-  if (skip_deterministic) {
-
-    if (force_deterministic)
-      FATAL("use -S instead of -M -d");
-    else
-      FATAL("-S already implies -d");
-
-  }
-
-  while (*x) {
-
-    if (!isalnum(*x) && *x != '_' && *x != '-')
-      FATAL("Non-alphanumeric fuzzer ID specified via -S or -M");
-
-    x++;
-
-  }
-
-  if (strlen(sync_id) > 32) FATAL("Fuzzer ID too long");
-
-  x = alloc_printf("%s/%s", out_dir, sync_id);
-
-  sync_dir = out_dir;
-  out_dir  = x;
-
-  if (!force_deterministic) {
-    skip_deterministic = 1;
-    use_splicing = 1;
-  }
-
-}
-
-
 /* Handle screen resize (SIGWINCH). */
 
 static void handle_resize(int sig) {
@@ -5974,7 +5919,7 @@ int main(int argc, char** argv) {
   gettimeofday(&tv, &tz);
   srandom(tv.tv_sec ^ tv.tv_usec ^ getpid());
 
-  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:Q")) > 0)
+  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:p:dnCB:x:Q")) > 0)
 
     switch (opt) {
 
@@ -5991,35 +5936,6 @@ int main(int argc, char** argv) {
 
         if (out_dir) FATAL("Multiple -o options not supported");
         out_dir = optarg;
-        break;
-
-      case 'M': { /* master sync ID */
-
-          u8* c;
-
-          if (sync_id) FATAL("Multiple -S or -M options not supported");
-          sync_id = ck_strdup(optarg);
-
-          if ((c = strchr(sync_id, ':'))) {
-
-            *c = 0;
-
-            if (sscanf(c + 1, "%u/%u", &master_id, &master_max) != 2 ||
-                !master_id || !master_max || master_id > master_max ||
-                master_max > 1000000) FATAL("Bogus master ID passed to -M");
-
-          }
-
-          force_deterministic = 1;
-
-        }
-
-        break;
-
-      case 'S': 
-
-        if (sync_id) FATAL("Multiple -S or -M options not supported");
-        sync_id = ck_strdup(optarg);
         break;
 
       case 'f': /* target file */
@@ -6142,18 +6058,22 @@ int main(int argc, char** argv) {
 
         break;
 
+      case 'p':
+        
+        if(port) FATAL("Multiple -p options not supported");
+        port = atoi(optarg);
+        break;
+
       default:
 
         usage(argv[0]);
 
     }
 
-  if (optind == argc || !in_dir || !out_dir) usage(argv[0]);
+  if (optind == argc || !in_dir || !out_dir || !port) usage(argv[0]);
 
   setup_signal_handlers();
   check_asan_opts();
-
-  if(sync_id) fix_up_sync();
 
   if (!strcmp(in_dir, out_dir))
     FATAL("Input and output directories can't be the same");
