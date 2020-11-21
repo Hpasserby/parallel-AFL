@@ -208,7 +208,7 @@ EXP_ST u64 total_crashes,             /* Total number of crashes          */
 
 
 static u8 *stage_name = "init",       /* Name of the current fuzz stage   */
-          *stage_short,               /* Short stage name                 */
+          *stage_short = "",          /* Short stage name                 */
           *syncing_party;             /* Currently syncing with...        */
 
 static s32 stage_cur, stage_max;      /* Stage progression                */
@@ -250,7 +250,7 @@ struct queue_entry {
   u8  cal_failed,                     /* Calibration failed?              */
       trim_done,                      /* Trimmed?                         */
       was_fuzzed,                     /* Had any fuzzing done yet?        */
-      doing_det,                     /* Deterministic stages passed?     */
+      doing_det,                      /* Deterministic stages passed?     */
       has_new_cov,                    /* Triggers new coverage?           */
       var_behavior,                   /* Variable behavior?               */
       favored,                        /* Currently favored?               */
@@ -4718,7 +4718,7 @@ static int handle_get_seed(int cfd, packet_info_t *pinfo) {
   int fd, ret = -1;
   u8* fname;
   uint32_t seed_len;
-  seed_info_t *seed, *new_seed;
+  seed_info_t *seed, *new_seed = NULL;
   packet_info_t *resp;
 
   seed = (seed_info_t*)packet_data(pinfo);
@@ -4741,6 +4741,7 @@ static int handle_get_seed(int cfd, packet_info_t *pinfo) {
     PFATAL("[-] Unable to open '%s'", fname);
 
   ck_read(fd, new_seed->content, seed_len, fname);
+  close(fd);
 
   ret = 0;
 
@@ -4758,8 +4759,8 @@ do_resp:
     close(cfd);
   
   free(resp);
-  free(new_seed);
-  close(fd);
+  if(new_seed)
+    free(new_seed);
 
   return ret;
 }

@@ -7043,7 +7043,7 @@ int main(int argc, char** argv) {
 
   while (1) {
 
-    u8 mutation_type;
+    u8 mutation_type = M_HAVOC;
 
     do {
       queue_cur = request_seed(argv, &mutation_type, 0);
