@@ -4236,7 +4236,7 @@ static void show_stats(void) {
   sprintf(tmp, "%5s/%5s (%0.02f%%)", DI(total_dup), DI(total_execs),
           ((double)total_dup) / total_execs);
 
-  SAYF(bV bSTOP "   bit flips : " cRST "%-37s " bSTG bV bSTOP "    levels : "
+  SAYF(bV bSTOP "  total dups : " cRST "%-37s " bSTG bV bSTOP "    levels : "
        cRST "%-10s " bSTG bV "\n", tmp, DI(max_depth));
 
   if (!skip_deterministic)
