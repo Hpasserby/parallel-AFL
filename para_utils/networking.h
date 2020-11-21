@@ -11,6 +11,7 @@
 #define GET_SEED    2   /* 若本地未缓存种子 则请求下载 */
 #define SYNC_BITMAP 3   /* 请求同步位图 */
 #define SYNC_EXTRAS 4   /* 同步extras */
+#define CHECK_DUP   5   /* 实验用 查询种子是否重复 */
 
 /* 策略选择 */
 #define M_BITFLIP   5
@@ -19,6 +20,18 @@
 #define M_EXTRAS    2
 #define M_HAVOC     1
 #define M_SPLICE    0
+
+
+#ifdef DUP_TEST
+
+typedef struct exec_info {
+
+  uint8_t mut_stage;
+  uint8_t seed_hash[33];
+
+} exec_info_t;
+
+#endif
 
 
 typedef struct seed_info {

@@ -75,6 +75,10 @@
 #include "para_utils/networking.h"
 #include "para_utils/work_queue.h"
 
+#ifdef DUP_TEST
+#include <mysql/mysql.h>
+#endif /* DUP_TEST */
+
 #if defined(__APPLE__) || defined(__FreeBSD__) || defined (__OpenBSD__)
 #  include <sys/sysctl.h>
 #endif /* __APPLE__ || __FreeBSD__ || __OpenBSD__ */
@@ -101,7 +105,7 @@
 
 #define MAX_EVENT_COUNT   32    /* epoll最大单次处理事件数 */ 
 #define QUEUE_TIMEOUT     10    /* 任务队列等待超时时间 */
-#define MAX_THEAD_COUNT   8     /* 最大任务线程数 */
+#define MAX_THREAD_COUNT   16     /* 最大任务线程数 */
 
 EXP_ST u8 *in_dir,                    /* Input directory with test cases  */
           *out_file,                  /* File to fuzz, if any             */
@@ -321,6 +325,19 @@ static pthread_mutex_t seed_exec_mutex;
 
 /* 监听端口 */
 static uint32_t port;
+
+#ifdef DUP_TEST
+
+#define MYSQL_HOST  "127.0.0.1"
+#define MYSQL_USER  "root"
+#define MYSQL_PASS  "hgy5945"
+#define MYSQL_DB    "fuzz"
+
+static u64 dup_cnt[M_BITFLIP + 2];
+static u64 mut_cnt[M_BITFLIP + 2];
+static u64 total_dup;
+
+#endif /*DUP_TEST */
 
 static u32 seek_to;
 static u64 prev_queued;
@@ -4211,6 +4228,53 @@ static void show_stats(void) {
 
   /* Aaaalmost there... hold on! */
 
+#ifdef DUP_TEST
+
+  SAYF(bVR bH cCYA bSTOP " duplicate seeds executed " bSTG bH10 bHT bH10
+       bH5 bHB bH bSTOP cCYA " path geometry " bSTG bH5 bH2 bH bVL "\n");
+
+  sprintf(tmp, "%5s/%5s (%0.02f%%)", DI(total_dup), DI(total_execs),
+          ((double)total_dup) / total_execs);
+
+  SAYF(bV bSTOP "   bit flips : " cRST "%-37s " bSTG bV bSTOP "    levels : "
+       cRST "%-10s " bSTG bV "\n", tmp, DI(max_depth));
+
+  if (!skip_deterministic)
+    sprintf(tmp, "%5s/%5s (%0.02f%%)", DI(dup_cnt[M_BITFLIP]), DI(mut_cnt[M_BITFLIP]), 
+            ((double)dup_cnt[M_BITFLIP]) / mut_cnt[M_BITFLIP]);
+
+  SAYF(bV bSTOP "  byte flips : " cRST "%-37s " bSTG bV bSTOP "   pending : "
+       cRST "%-10s " bSTG bV "\n", tmp, DI(pending_not_fuzzed));
+
+  if (!skip_deterministic)
+    sprintf(tmp, "%5s/%5s (%0.02f%%)", DI(dup_cnt[M_ARITH]), DI(mut_cnt[M_ARITH]),
+            ((double)dup_cnt[M_ARITH]) / mut_cnt[M_ARITH]);
+
+  SAYF(bV bSTOP " arithmetics : " cRST "%-37s " bSTG bV bSTOP "  pend fav : "
+       cRST "%-10s " bSTG bV "\n", tmp, DI(pending_favored));
+
+  if (!skip_deterministic)
+    sprintf(tmp, "%5s/%5s (%0.02f%%)", DI(dup_cnt[M_INTEREST]), DI(mut_cnt[M_INTEREST]),
+            ((double)dup_cnt[M_INTEREST]) / mut_cnt[M_INTEREST]);
+
+  SAYF(bV bSTOP "  known ints : " cRST "%-37s " bSTG bV bSTOP " own finds : "
+       cRST "%-10s " bSTG bV "\n", tmp, DI(queued_discovered));
+
+  if (!skip_deterministic)
+    sprintf(tmp, "%5s/%5s (%0.02f%%)", DI(dup_cnt[M_EXTRAS]), DI(mut_cnt[M_EXTRAS]), 
+            ((double)dup_cnt[M_EXTRAS]) / mut_cnt[M_EXTRAS]);
+
+  SAYF(bV bSTOP "  dictionary : " cRST "%-37s " bSTG bV bSTOP
+       "  imported : " cRST "%-10s " bSTG bV "\n", tmp,
+        DI(queued_imported));
+
+  sprintf(tmp, "%5s/%5s (%0.02f%%)", DI(dup_cnt[M_HAVOC]), DI(mut_cnt[M_HAVOC]), 
+          ((double)dup_cnt[M_HAVOC]) / mut_cnt[M_HAVOC]);
+
+  SAYF(bV bSTOP "       havoc : " cRST "%-37s " bSTG bV bSTOP, tmp);
+
+#else
+  
   SAYF(bVR bH cCYA bSTOP " fuzzing strategy yields " bSTG bH10 bH bHT bH10
        bH5 bHB bH bSTOP cCYA " path geometry " bSTG bH5 bH2 bH bVL "\n");
 
@@ -4239,6 +4303,7 @@ static void show_stats(void) {
   SAYF(bV bSTOP "  byte flips : " cRST "%-37s " bSTG bV bSTOP "   pending : "
        cRST "%-10s " bSTG bV "\n", tmp, DI(pending_not_fuzzed));
 
+  
   if (!skip_deterministic)
     sprintf(tmp, "%s/%s, %s/%s, %s/%s",
             DI(stage_finds[STAGE_ARITH8]), DI(stage_cycles[STAGE_ARITH8]),
@@ -4247,7 +4312,7 @@ static void show_stats(void) {
 
   SAYF(bV bSTOP " arithmetics : " cRST "%-37s " bSTG bV bSTOP "  pend fav : "
        cRST "%-10s " bSTG bV "\n", tmp, DI(pending_favored));
-
+  
   if (!skip_deterministic)
     sprintf(tmp, "%s/%s, %s/%s, %s/%s",
             DI(stage_finds[STAGE_INTEREST8]), DI(stage_cycles[STAGE_INTEREST8]),
@@ -4256,6 +4321,7 @@ static void show_stats(void) {
 
   SAYF(bV bSTOP "  known ints : " cRST "%-37s " bSTG bV bSTOP " own finds : "
        cRST "%-10s " bSTG bV "\n", tmp, DI(queued_discovered));
+
 
   if (!skip_deterministic)
     sprintf(tmp, "%s/%s, %s/%s, %s/%s",
@@ -4267,11 +4333,14 @@ static void show_stats(void) {
        "  imported : " cRST "%-10s " bSTG bV "\n", tmp,
         DI(queued_imported));
 
+
   sprintf(tmp, "%s/%s, %s/%s",
           DI(stage_finds[STAGE_HAVOC]), DI(stage_cycles[STAGE_HAVOC]),
           DI(stage_finds[STAGE_SPLICE]), DI(stage_cycles[STAGE_SPLICE]));
 
   SAYF(bV bSTOP "       havoc : " cRST "%-37s " bSTG bV bSTOP, tmp);
+
+#endif /* DUP_TEST */
 
   if (t_bytes) sprintf(tmp, "%0.02f%%", stab_ratio);
     else strcpy(tmp, "n/a");
@@ -4808,6 +4877,82 @@ static int handle_sync_bitmap(int cfd, packet_info_t *pinfo) {
 }
 
 
+#ifdef DUP_TEST
+
+static MYSQL* initialize_mysql() {
+  
+  MYSQL* mysql;
+ 
+  mysql = mysql_init(NULL);
+  if(mysql == NULL) {
+    fprintf(stderr, "[-] mysql_init failed\n");
+    exit(1);
+  }
+  mysql = mysql_real_connect(mysql, MYSQL_HOST, MYSQL_USER, 
+                              MYSQL_PASS, MYSQL_DB, 0, NULL, 0);
+  if(mysql == NULL) {
+    fprintf(stderr, "[-] mysql connection: %s\n", mysql_error(mysql));
+    exit(1);
+  }
+  
+  return mysql;
+
+}
+
+
+static int handle_check_dup(MYSQL* mysql, packet_info_t *pinfo) {
+
+  int ret = -1, exist = 0;
+  exec_info_t *exec_info;
+  MYSQL_RES *rs;
+  char sql[256] = {'\0'};
+
+  exec_info = (exec_info_t*)packet_data(pinfo);
+  if(exec_info == NULL)
+    return ret;
+  
+  total_execs++;
+  mut_cnt[exec_info->mut_stage]++;
+
+  if(mysql == NULL)
+    mysql = initialize_mysql();
+
+  exec_info->seed_hash[32] = '\0';
+  sprintf(sql, "SELECT * FROM seeds where id = '%s'", exec_info->seed_hash);
+ 
+  ret = mysql_query(mysql, sql);
+  if(ret) {
+    fprintf(stderr, "[-] mysql query failed\n");
+    return ret;
+  }
+
+  rs = mysql_store_result(mysql);
+  if(rs == NULL) {
+    fprintf(stderr, "[-] mysql query failed\n");
+  }
+  while(mysql_fetch_row(rs))
+    exist = 1;
+  mysql_free_result(rs);
+  
+  if(!exist) { 
+
+    sprintf(sql, "INSERT INTO seeds (id) VALUES (\"%s\")", exec_info->seed_hash);
+    mysql_query(mysql, sql);
+
+  } else {
+
+    total_dup++;
+    dup_cnt[exec_info->mut_stage]++;
+
+  }
+
+  return 0;
+
+}
+
+#endif /* DUP_TEST */
+
+
 /* 执行节点的请求。从任务队列中获取请求事件并处理，若一段时间内
    队列中无新事件，则退出线程 */
 
@@ -4817,6 +4962,11 @@ static void* work_thread(void *arg) {
   packet_info_t *pinfo;
   request_task_t *task;
   char** argv = (char**)arg;
+
+#ifdef DUP_TEST
+  /* 每个线程一个mysql连接 */
+  MYSQL *mysql = NULL;
+#endif
 
   for(;;) {
 
@@ -4850,6 +5000,14 @@ static void* work_thread(void *arg) {
         handle_sync_bitmap(cfd, pinfo);
         break;
 
+#ifdef DUP_TEST
+      case CHECK_DUP:
+        if(mysql == NULL)
+          mysql = initialize_mysql();
+        handle_check_dup(mysql, pinfo);
+        break;
+#endif /* DUP_TEST */
+
       default:
         close(cfd);
         break;
@@ -4864,6 +5022,12 @@ static void* work_thread(void *arg) {
   }
 
 out:
+
+#ifdef DUP_TEST
+  if(mysql)
+    mysql_close(mysql);
+#endif
+
   pthread_mutex_lock(&thread_num_mutex);
   --cur_thread_num;
   pthread_mutex_unlock(&thread_num_mutex);
@@ -4896,7 +5060,7 @@ static int handle_request(char** argv, int client_fd) {
   task->pinfo = pinfo;
 
   pthread_mutex_lock(&thread_num_mutex);
-  if(cur_thread_num < MAX_THEAD_COUNT) {
+  if(cur_thread_num < MAX_THREAD_COUNT) {
     
     pthread_t tid;
     ret = pthread_create(&tid, NULL, work_thread, argv);

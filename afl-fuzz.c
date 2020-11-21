@@ -74,6 +74,10 @@
 #include "para_utils/networking.h"
 #include "para_utils/work_queue.h"
 
+#ifdef DUP_TEST
+#include "para_utils/md5.h"
+#endif /* DUP_TEST */
+
 #if defined(__APPLE__) || defined(__FreeBSD__) || defined (__OpenBSD__)
 #  include <sys/sysctl.h>
 #endif /* __APPLE__ || __FreeBSD__ || __OpenBSD__ */
@@ -305,6 +309,8 @@ typedef struct seed_cache_entry {
 static seed_cache_entry_t seed_cache[CACHE_MAX];
 
 static u32 last_id;
+
+static u8 cur_mutation;
 
 /* Fuzzing stages */
 
@@ -3721,6 +3727,46 @@ abort_trimming:
 }
 
 
+#ifdef DUP_TEST
+
+static u8 check_duplicate(u8* out_buf, u32 len) {
+
+  int ret;
+  MD5_CTX md5;
+  unsigned char md5_value[16];
+  char *md5_string;
+  packet_info_t *pinfo;
+  exec_info_t einfo;
+
+  MD5Init(&md5);
+  MD5Update(&md5, out_buf, len);
+  MD5Final(&md5, md5_value);
+  md5_string = MD5toString(md5_value);
+
+  einfo.mut_stage = cur_mutation;
+  memcpy(einfo.seed_hash, md5_string, 32);
+
+  pinfo = new_packet(CHECK_DUP, &einfo, sizeof(einfo));
+  if(pinfo == NULL)
+    fatal("[-] new_packet");
+
+  ret = send_packet(sock_fd, pinfo);
+  if(ret < 0) {
+    fprintf(stderr, "[-] send_packet\n");
+    stop_soon = 1;
+    return ret;
+  }
+
+  free(pinfo);
+  free(md5_string);
+
+  return 1;
+  
+}
+
+#endif /* DUP_TEST */
+
+
 /* Write a modified test case, run program, process results. Handle
    error conditions, returning 1 if it's time to bail out. This is
    a helper function for fuzz_one(). */
@@ -3728,6 +3774,10 @@ abort_trimming:
 EXP_ST u8 common_fuzz_stuff(char** argv, u8* out_buf, u32 len) {
 
   u8 fault;
+
+#ifdef DUP_TEST
+  check_duplicate(out_buf, len);
+#endif /* DUP_TEST */
 
   if (post_handler) {
 
@@ -5849,6 +5899,8 @@ static u8 fuzz_one(char** argv, u8 mutation_type) {
   }
 
   memcpy(out_buf, in_buf, len);
+
+  cur_mutation = mutation_type;
 
   switch(mutation_type) {
   

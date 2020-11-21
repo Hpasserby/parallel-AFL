@@ -22,6 +22,8 @@ HELPER_PATH = $(PREFIX)/lib/afl
 DOC_PATH    = $(PREFIX)/share/doc/afl
 MISC_PATH   = $(PREFIX)/share/afl
 
+TEST_VER 	 ?= no
+
 # PROGS intentionally omit afl-as, which gets installed elsewhere.
 
 PROGS       = afl-gcc afl-fuzz afl-showmap afl-tmin afl-gotcpu afl-analyze afl-server
@@ -32,8 +34,13 @@ CFLAGS     += -Wall -D_FORTIFY_SOURCE=2 -g -Wno-pointer-sign \
 	      -DAFL_PATH=\"$(HELPER_PATH)\" -DDOC_PATH=\"$(DOC_PATH)\" \
 	      -DBIN_PATH=\"$(BIN_PATH)\" 
 
+ifeq ($(TEST_VER), yes)
+	CFLAGS		+= -DDUP_TEST
+	LDFLAGS		+= -lmysqlclient
+endif
+
 ifneq "$(filter Linux GNU%,$(shell uname))" ""
-  LDFLAGS  += -ldl
+  LDFLAGS  += -ldl -pthread
 endif
 
 ifeq "$(findstring clang, $(shell $(CC) --version 2>/dev/null))" ""
@@ -44,8 +51,9 @@ endif
 
 COMM_HDR    = alloc-inl.h config.h debug.h types.h
 UTILS				= para_utils/networking.c para_utils/networking.h \
-							para_utils/work_queue.c para_utils/work_queue.h
-UTILS_OBJ		= networking.o work_queue.o
+							para_utils/work_queue.c para_utils/work_queue.h \
+							para_utils/md5.c para_utils/md5.h
+UTILS_OBJ		= networking.o work_queue.o md5.o
 
 all: test_x86 $(PROGS) afl-as test_build all_done
 
@@ -73,7 +81,7 @@ afl-as: afl-as.c afl-as.h $(COMM_HDR) | test_x86
 	ln -sf afl-as as
 
 afl-fuzz: afl-fuzz.o $(UTILS_OBJ) | test_x86
-	$(CC) $(CFLAGS) $@.o $(UTILS_OBJ) -o $@ $(LDFLAGS) -pthread
+	$(CC) $(CFLAGS) $@.o $(UTILS_OBJ) -o $@ $(LDFLAGS) 
 
 afl-showmap: afl-showmap.c $(COMM_HDR) | test_x86
 	$(CC) $(CFLAGS) $@.c -o $@ $(LDFLAGS)
@@ -88,13 +96,16 @@ afl-gotcpu: afl-gotcpu.c $(COMM_HDR) | test_x86
 	$(CC) $(CFLAGS) $@.c -o $@ $(LDFLAGS)
 
 afl-server: afl-server.o $(UTILS_OBJ) | test_x86
-	$(CC) $(CFLAGS) $@.o $(UTILS_OBJ) -o $@ $(LDFLAGS) -pthread
+	$(CC) $(CFLAGS) $@.o $(UTILS_OBJ) -o $@ $(LDFLAGS)
 
 networking.o: para_utils/networking.c para_utils/networking.h
 	$(CC) $(CFLAGS) -c para_utils/networking.c -o $@ $(LDFLAGS)
 
 work_queue.o: para_utils/work_queue.c para_utils/work_queue.h
 	$(CC) $(CFLAGS) -c para_utils/work_queue.c -o $@ $(LDFLAGS)
+
+md5.o: para_utils/md5.c para_utils/md5.h
+	$(CC) $(CFLAGS) -c para_utils/md5.c -o $@ $(LDFLAGS)
 
 afl-fuzz.o: afl-fuzz.c $(COMM_HDR)
 	$(CC) $(CFLAGS) -c $< -o $@ $(LDFLAGS)
