@@ -4241,35 +4241,35 @@ static void show_stats(void) {
 
   if (!skip_deterministic)
     sprintf(tmp, "%5s/%5s (%0.02f%%)", DI(dup_cnt[M_BITFLIP]), DI(mut_cnt[M_BITFLIP]), 
-            ((double)dup_cnt[M_BITFLIP]) / mut_cnt[M_BITFLIP]);
+            ((double)dup_cnt[M_BITFLIP]) * 100 / mut_cnt[M_BITFLIP]);
 
   SAYF(bV bSTOP "  byte flips : " cRST "%-37s " bSTG bV bSTOP "   pending : "
        cRST "%-10s " bSTG bV "\n", tmp, DI(pending_not_fuzzed));
 
   if (!skip_deterministic)
     sprintf(tmp, "%5s/%5s (%0.02f%%)", DI(dup_cnt[M_ARITH]), DI(mut_cnt[M_ARITH]),
-            ((double)dup_cnt[M_ARITH]) / mut_cnt[M_ARITH]);
+            ((double)dup_cnt[M_ARITH]) * 100 / mut_cnt[M_ARITH]);
 
   SAYF(bV bSTOP " arithmetics : " cRST "%-37s " bSTG bV bSTOP "  pend fav : "
        cRST "%-10s " bSTG bV "\n", tmp, DI(pending_favored));
 
   if (!skip_deterministic)
     sprintf(tmp, "%5s/%5s (%0.02f%%)", DI(dup_cnt[M_INTEREST]), DI(mut_cnt[M_INTEREST]),
-            ((double)dup_cnt[M_INTEREST]) / mut_cnt[M_INTEREST]);
+            ((double)dup_cnt[M_INTEREST]) * 100 / mut_cnt[M_INTEREST]);
 
   SAYF(bV bSTOP "  known ints : " cRST "%-37s " bSTG bV bSTOP " own finds : "
        cRST "%-10s " bSTG bV "\n", tmp, DI(queued_discovered));
 
   if (!skip_deterministic)
     sprintf(tmp, "%5s/%5s (%0.02f%%)", DI(dup_cnt[M_EXTRAS]), DI(mut_cnt[M_EXTRAS]), 
-            ((double)dup_cnt[M_EXTRAS]) / mut_cnt[M_EXTRAS]);
+            ((double)dup_cnt[M_EXTRAS]) * 100 / mut_cnt[M_EXTRAS]);
 
   SAYF(bV bSTOP "  dictionary : " cRST "%-37s " bSTG bV bSTOP
        "  imported : " cRST "%-10s " bSTG bV "\n", tmp,
         DI(queued_imported));
 
   sprintf(tmp, "%5s/%5s (%0.02f%%)", DI(dup_cnt[M_HAVOC]), DI(mut_cnt[M_HAVOC]), 
-          ((double)dup_cnt[M_HAVOC]) / mut_cnt[M_HAVOC]);
+          ((double)dup_cnt[M_HAVOC]) * 100 / mut_cnt[M_HAVOC]);
 
   SAYF(bV bSTOP "       havoc : " cRST "%-37s " bSTG bV bSTOP, tmp);
 
