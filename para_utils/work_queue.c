@@ -65,7 +65,7 @@ int push_queue(queue_t *que, void *task) {
     que->tail = item;
   }
   
-  ++que->item_num;
+  __sync_add_and_fetch(&que->item_num, 1);
 
   pthread_mutex_unlock(&que->push_mutex);
   if(item_num == 0 && !que->nonblock)
@@ -110,7 +110,7 @@ void* pop_queue(queue_t *que) {
   else
     que->head = item->next;
 
-  --que->item_num;
+  __sync_sub_and_fetch(&que->item_num, 1);
   curr_num = que->item_num;
 
   task = item->task;

@@ -105,7 +105,7 @@
 
 #define MAX_EVENT_COUNT   32    /* epoll最大单次处理事件数 */ 
 #define QUEUE_TIMEOUT     10    /* 任务队列等待超时时间 */
-#define MAX_THREAD_COUNT   16     /* 最大任务线程数 */
+#define MAX_THREAD_COUNT  32    /* 最大任务线程数 */
 
 EXP_ST u8 *in_dir,                    /* Input directory with test cases  */
           *out_file,                  /* File to fuzz, if any             */
@@ -4234,7 +4234,7 @@ static void show_stats(void) {
        bH5 bHB bH bSTOP cCYA " path geometry " bSTG bH5 bH2 bH bVL "\n");
 
   sprintf(tmp, "%5s/%5s (%0.02f%%)", DI(total_dup), DI(total_execs),
-          ((double)total_dup) / total_execs);
+          ((double)total_dup) * 100 / total_execs);
 
   SAYF(bV bSTOP "  total dups : " cRST "%-37s " bSTG bV bSTOP "    levels : "
        cRST "%-10s " bSTG bV "\n", tmp, DI(max_depth));
@@ -4243,7 +4243,7 @@ static void show_stats(void) {
     sprintf(tmp, "%5s/%5s (%0.02f%%)", DI(dup_cnt[M_BITFLIP]), DI(mut_cnt[M_BITFLIP]), 
             ((double)dup_cnt[M_BITFLIP]) * 100 / mut_cnt[M_BITFLIP]);
 
-  SAYF(bV bSTOP "  byte flips : " cRST "%-37s " bSTG bV bSTOP "   pending : "
+  SAYF(bV bSTOP "  bit flips : " cRST "%-37s " bSTG bV bSTOP "   pending : "
        cRST "%-10s " bSTG bV "\n", tmp, DI(pending_not_fuzzed));
 
   if (!skip_deterministic)
