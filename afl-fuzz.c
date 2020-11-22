@@ -2704,6 +2704,37 @@ static void write_stats_file(double bitmap_cvg, double stability, double eps) {
 }
 
 
+/* 上传本节点的状态信息 */
+
+static int maybe_put_status() {
+
+  static uint64_t last_execs = 0;
+  int ret = 0;
+  node_status_t status;
+  packet_info_t *pinfo;
+ 
+  if(last_execs == total_execs)
+    return ret;
+
+  status.delta_execs = total_execs - last_execs;
+  last_execs = total_execs; 
+
+  pinfo = new_packet(PUT_STATUS, &status, sizeof(status));
+  if(pinfo == NULL)
+    fatal("[-] new_packet");
+
+  ret = send_packet(sock_fd, pinfo);
+  if(ret < 0) {
+    fprintf(stderr, "[-] send packet\n");
+    stop_soon = 1;
+  }
+
+  free(pinfo);
+  return ret;
+
+}
+
+
 /* Update the plot file if there is a reason to. */
 
 static void maybe_update_plot_file(double bitmap_cvg, double eps) {
@@ -3017,7 +3048,7 @@ static void check_term_size(void);
 
 static void show_stats(void) {
 
-  static u64 last_stats_ms, last_plot_ms, last_ms, last_execs;
+  static u64 last_stats_ms, last_plot_ms, last_putstats_ms, last_ms, last_execs;
   static double avg_exec;
   double t_byte_ratio, stab_ratio;
 
@@ -3095,6 +3126,15 @@ static void show_stats(void) {
     last_plot_ms = cur_ms;
     maybe_update_plot_file(t_byte_ratio, avg_exec);
  
+  }
+
+  /* 每0.7秒上传一次状态信息 */
+
+  if (cur_ms - last_putstats_ms > 700) {
+
+    last_putstats_ms = cur_ms;
+    maybe_put_status();
+
   }
 
   /* Honor AFL_EXIT_WHEN_DONE and AFL_BENCH_UNTIL_CRASH. */

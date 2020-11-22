@@ -2459,7 +2459,7 @@ static u8 run_target(char** argv, u32 timeout) {
 
   setitimer(ITIMER_REAL, &it, NULL);
 
-  total_execs++;
+  __sync_add_and_fetch(&total_execs, 1);
 
   /* Any subsequent operations on trace_bits must not be moved by the
      compiler below this point. Past this location, trace_bits[] behave
@@ -3947,11 +3947,11 @@ static void show_stats(void) {
     /* If there is a dramatic (5x+) jump in speed, reset the indicator
        more quickly. */
 
-    if (cur_avg * 5 < avg_exec || cur_avg / 5 > avg_exec)
+    if ((cur_avg * 5 < avg_exec || cur_avg / 5 > avg_exec) && cur_ms - last_ms > 1000)
       avg_exec = cur_avg;
 
-    avg_exec = avg_exec * (1.0 - 1.0 / AVG_SMOOTHING) +
-               cur_avg * (1.0 / AVG_SMOOTHING);
+    avg_exec = avg_exec * (1.0 - 1.0 / (AVG_SMOOTHING)) +
+               cur_avg * (1.0 / (AVG_SMOOTHING));
 
   }
 
@@ -4243,7 +4243,7 @@ static void show_stats(void) {
     sprintf(tmp, "%5s/%5s (%0.02f%%)", DI(dup_cnt[M_BITFLIP]), DI(mut_cnt[M_BITFLIP]), 
             ((double)dup_cnt[M_BITFLIP]) * 100 / mut_cnt[M_BITFLIP]);
 
-  SAYF(bV bSTOP "  bit flips : " cRST "%-37s " bSTG bV bSTOP "   pending : "
+  SAYF(bV bSTOP "   bit flips : " cRST "%-37s " bSTG bV bSTOP "   pending : "
        cRST "%-10s " bSTG bV "\n", tmp, DI(pending_not_fuzzed));
 
   if (!skip_deterministic)
@@ -4911,7 +4911,6 @@ static int handle_check_dup(MYSQL* mysql, packet_info_t *pinfo) {
   if(exec_info == NULL)
     return ret;
   
-  total_execs++;
   mut_cnt[exec_info->mut_stage]++;
 
   if(mysql == NULL)
@@ -4951,6 +4950,21 @@ static int handle_check_dup(MYSQL* mysql, packet_info_t *pinfo) {
 }
 
 #endif /* DUP_TEST */
+
+
+static int handle_put_status(packet_info_t *pinfo) {
+
+  node_status_t *status;
+  
+  status = (node_status_t*)packet_data(pinfo);
+  if(status == NULL)
+    return -1;
+
+  __sync_add_and_fetch(&total_execs, status->delta_execs); 
+
+  return 0;
+
+}
 
 
 /* 执行节点的请求。从任务队列中获取请求事件并处理，若一段时间内
@@ -4998,6 +5012,10 @@ static void* work_thread(void *arg) {
 
       case SYNC_BITMAP:
         handle_sync_bitmap(cfd, pinfo);
+        break;
+
+      case PUT_STATUS:
+        handle_put_status(pinfo);
         break;
 
 #ifdef DUP_TEST

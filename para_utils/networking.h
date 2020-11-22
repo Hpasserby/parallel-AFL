@@ -9,8 +9,8 @@
 #define PUT_SEED    0   /* 上传新种子 */
 #define GET_TASK    1   /* 请求fuzz任务 */
 #define GET_SEED    2   /* 若本地未缓存种子 则请求下载 */
-#define SYNC_BITMAP 3   /* 请求同步位图 */
-#define SYNC_EXTRAS 4   /* 同步extras */
+#define PUT_STATUS  3   /* 节点上传状态信息 */
+#define SYNC_BITMAP 4   /* 请求同步位图 */
 #define CHECK_DUP   5   /* 实验用 查询种子是否重复 */
 
 /* 策略选择 */
@@ -32,6 +32,13 @@ typedef struct exec_info {
 } exec_info_t;
 
 #endif
+
+
+typedef struct node_status {
+
+  uint64_t delta_execs;     /* 执行次数增量 */
+
+} node_status_t;
 
 
 typedef struct seed_info {
