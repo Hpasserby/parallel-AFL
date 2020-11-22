@@ -3498,6 +3498,17 @@ static void write_stats_file(double bitmap_cvg, double stability, double eps) {
 
 static void maybe_update_plot_file(double bitmap_cvg, double eps) {
 
+#ifdef DUP_TEST
+
+  fprintf(plot_file, 
+          "%llu, %llu, %u, %u, %u, %u, %0.02f%%, %llu, %llu, %u, %0.02f, %0.03f%%\n",
+          get_cur_time() / 1000, queue_cycle - 1, current_entry, queued_paths,
+          pending_not_fuzzed, pending_favored, bitmap_cvg, unique_crashes,
+          unique_hangs, max_depth, eps, 
+          ((double)total_dup) * 100 / total_execs); /* ignore errors */
+
+#else
+  
   static u32 prev_qp, prev_pf, prev_pnf, prev_ce, prev_md;
   static u64 prev_qc, prev_uc, prev_uh;
 
@@ -3526,6 +3537,8 @@ static void maybe_update_plot_file(double bitmap_cvg, double eps) {
           get_cur_time() / 1000, queue_cycle - 1, current_entry, queued_paths,
           pending_not_fuzzed, pending_favored, bitmap_cvg, unique_crashes,
           unique_hangs, max_depth, eps); /* ignore errors */
+
+#endif
 
   fflush(plot_file);
 
@@ -5042,7 +5055,8 @@ out:
   if(mysql)
     mysql_close(mysql);
 #endif
-
+  
+  show_stats();
   pthread_mutex_lock(&thread_num_mutex);
   --cur_thread_num;
   pthread_mutex_unlock(&thread_num_mutex);
@@ -5614,10 +5628,21 @@ EXP_ST void setup_dirs_fds(void) {
   plot_file = fdopen(fd, "w");
   if (!plot_file) PFATAL("fdopen() failed");
 
+#ifdef DUP_TEST
+
+  fprintf(plot_file, "# unix_time, cycles_done, cur_path, paths_total, "
+                     "pending_total, pending_favs, map_size, unique_crashes, "
+                     "unique_hangs, max_depth, execs_per_sec, duplicate_rate\n");
+                     /* ignore errors */
+
+#else 
+
   fprintf(plot_file, "# unix_time, cycles_done, cur_path, paths_total, "
                      "pending_total, pending_favs, map_size, unique_crashes, "
                      "unique_hangs, max_depth, execs_per_sec\n");
                      /* ignore errors */
+
+#endif
 
 }
 
