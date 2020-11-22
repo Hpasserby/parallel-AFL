@@ -4546,11 +4546,8 @@ static int handle_new_client(int listen_fd) {
 
   tcp_socket_info si;
 
-  si.sfd = accept(listen_fd, 
-            (struct sockaddr*)&si.sock_addr, &si.sock_len);
-
-  // TODO
-  // 初始化节点bitmap extras
+  si.sfd = accept4(listen_fd, (struct sockaddr*)&si.sock_addr, 
+                    &si.sock_len, SOCK_NONBLOCK);
 
   if(si.sfd < 0)
     return si.sfd;
