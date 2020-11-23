@@ -4167,7 +4167,7 @@ static u8 could_be_interest(u32 old_val, u32 new_val, u8 blen, u8 check_le) {
 static int initialize_client() {
 
   int ret;
-  char *hello = "hello";
+  char *hello = "hgy";
 
   sock_fd = get_tcp_client(ip, port);
   if (sock_fd < 0)

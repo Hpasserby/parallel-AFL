@@ -4556,7 +4556,7 @@ static void show_init_stats(void) {
 static int handle_new_client(int listen_fd) {
 
   int ret;
-  char *hello = "hello", buf[8];
+  char *hello = "hgy", buf[8];
   tcp_socket_info si;
 
   si.sfd = accept4(listen_fd, (struct sockaddr*)&si.sock_addr, 
@@ -4565,8 +4565,10 @@ static int handle_new_client(int listen_fd) {
     return si.sfd;
 
   ret = recv_data(si.sfd, buf, strlen(hello));
-  if(ret < 0 || memcmp(buf, hello, strlen(hello)))
+  if(ret < 0 || memcmp(buf, hello, strlen(hello))) {
+    close(si.sfd);
     return ret;
+  }
 
   return si.sfd;
 
