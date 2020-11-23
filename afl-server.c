@@ -4657,7 +4657,10 @@ retry_random:
       prev_queued = queued_paths;
 
     }
-    
+   
+    if(queue_cur->doing_det != M_BITFLIP && !queue->was_fuzzed)
+      goto skip_prob;
+
 #ifdef IGNORE_FINDS
 
     if (queue_cur->depth > 1) goto next;
@@ -4684,6 +4687,8 @@ retry_random:
     }
 
 #endif /* ^IGNORE_FINDS */
+
+skip_prob:
 
     seed_entry = queue_cur;
     *stage = queue_cur->doing_det;
