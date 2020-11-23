@@ -3128,9 +3128,9 @@ static void show_stats(void) {
  
   }
 
-  /* 每0.7秒上传一次状态信息 */
+  /* 每秒上传一次状态信息 */
 
-  if (cur_ms - last_putstats_ms > 700) {
+  if (cur_ms - last_putstats_ms > 1000) {
 
     last_putstats_ms = cur_ms;
     maybe_put_status();

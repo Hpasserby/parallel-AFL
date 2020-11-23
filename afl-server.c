@@ -3925,6 +3925,7 @@ static void show_stats(void) {
   static u64 last_stats_ms, last_plot_ms, last_ms, last_execs;
   static double avg_exec;
   double t_byte_ratio, stab_ratio;
+  struct queue_entry *next_seed = queue_cur ? queue_cur : queue;
 
   u64 cur_ms;
   u32 t_bytes, t_bits;
@@ -3933,8 +3934,6 @@ static void show_stats(void) {
   u8  tmp[256];
 
   cur_ms = get_cur_time();
-
-  if (!queue_cur) return;
 
   /* If not enough time has passed since last UI update, bail out. */
 
@@ -3958,7 +3957,7 @@ static void show_stats(void) {
     /* If there is a dramatic (5x+) jump in speed, reset the indicator
        more quickly. */
 
-    if ((cur_avg * 5 < avg_exec || cur_avg / 5 > avg_exec) && cur_ms - last_ms > 1000)
+    if ((cur_avg * 5 < avg_exec || cur_avg / 5 > avg_exec) && cur_ms - last_ms > 1200)
       avg_exec = cur_avg;
 
     avg_exec = avg_exec * (1.0 - 1.0 / (AVG_SMOOTHING)) +
@@ -4149,12 +4148,12 @@ static void show_stats(void) {
      put them in a temporary buffer first. */
 
   sprintf(tmp, "%s%s (%0.02f%%)", DI(current_entry),
-          queue_cur->favored ? "" : "*",
+          next_seed->favored ? "" : "*",
           ((double)current_entry * 100) / queued_paths);
 
   SAYF(bV bSTOP "  now processing : " cRST "%-17s " bSTG bV bSTOP, tmp);
 
-  sprintf(tmp, "%0.02f%% / %0.02f%%", ((double)queue_cur->bitmap_size) * 
+  sprintf(tmp, "%0.02f%% / %0.02f%%", ((double)next_seed->bitmap_size) * 
           100 / MAP_SIZE, t_byte_ratio);
 
   SAYF("    map density : %s%-21s " bSTG bV "\n", t_byte_ratio > 70 ? cLRD : 
@@ -4611,8 +4610,37 @@ retry_random:
 
   while (!seed_entry) {
     
-    if (!queue_cur)
-      goto restart;
+    if (!queue_cur) {
+
+      queue_cycle++;
+      current_entry     = 0;
+      cur_skipped_paths = 0;
+      queue_cur         = queue;
+
+      while (seek_to) {
+    
+        current_entry++;
+        seek_to--;
+        queue_cur = queue_cur->next;
+
+      }
+
+      show_stats();
+
+      if (not_on_tty) {
+        ACTF("Entering queue cycle %llu.", queue_cycle);
+        fflush(stdout);
+      }
+
+      if (queued_paths == prev_queued) {
+
+        if (use_splicing) cycles_wo_finds++; else use_splicing=1;
+
+      } else cycles_wo_finds = 0;
+
+      prev_queued = queued_paths;
+
+    }
     
 #ifdef IGNORE_FINDS
 
@@ -4675,40 +4703,6 @@ next:
 
     queue_cur = queue_cur->next;
     current_entry++;
-
-    if (!queue_cur) {
-
-restart:
-
-      queue_cycle++;
-      current_entry     = 0;
-      cur_skipped_paths = 0;
-      queue_cur         = queue;
-
-      while (seek_to) {
-    
-        current_entry++;
-        seek_to--;
-        queue_cur = queue_cur->next;
-
-      }
-
-      show_stats();
-
-      if (not_on_tty) {
-        ACTF("Entering queue cycle %llu.", queue_cycle);
-        fflush(stdout);
-      }
-
-      if (queued_paths == prev_queued) {
-
-        if (use_splicing) cycles_wo_finds++; else use_splicing=1;
-
-      } else cycles_wo_finds = 0;
-
-      prev_queued = queued_paths;
-
-    }
 
   }
 
