@@ -789,7 +789,7 @@ static s32 sync_bitmap() {
   if(pinfo == NULL) fatal("[-] new_packet");
 
   ret = send_packet(sock_fd, pinfo);
-  if(ret < 0) goto sock_err;
+  if(ret <= 0) goto sock_err;
 
   free(pinfo);
 
@@ -2550,6 +2550,8 @@ do_upload:
   seed_info->size = sizeof(seed_info_t) + len;
   seed_info->flag = 0;
   seed_info->seed_len = len;
+  seed_info->handicap = 0;  /* 不需要上传 由服务端填入 */
+  seed_info->depth = cur_depth;
   memcpy(seed_info->content, mem, len);
 
   pinfo = new_packet(PUT_SEED, seed_info, seed_info->size);
@@ -2557,7 +2559,7 @@ do_upload:
     fatal("[-] new_packet");
 
   ret = send_packet(sock_fd, pinfo);
-  if(ret < 0) { 
+  if(ret <= 0) { 
     fprintf(stderr, "[-] upload_if_interesting: socket error\n");
     stop_soon = 1;
   }
@@ -2724,7 +2726,7 @@ static int maybe_put_status() {
     fatal("[-] new_packet");
 
   ret = send_packet(sock_fd, pinfo);
-  if(ret < 0) {
+  if(ret <= 0) {
     fprintf(stderr, "[-] send packet\n");
     stop_soon = 1;
   }
@@ -3791,7 +3793,7 @@ static u8 check_duplicate(u8* out_buf, u32 len) {
     fatal("[-] new_packet");
 
   ret = send_packet(sock_fd, pinfo);
-  if(ret < 0) {
+  if(ret <= 0) {
     fprintf(stderr, "[-] send_packet\n");
     stop_soon = 1;
     return ret;
@@ -4168,6 +4170,8 @@ static int initialize_client() {
 
   int ret;
   char *hello = "hgy";
+  packet_info_t *pinfo;
+  init_status_t *status;
 
   sock_fd = get_tcp_client(ip, port);
   if (sock_fd < 0)
@@ -4176,6 +4180,17 @@ static int initialize_client() {
   ret = send_data(sock_fd, hello, strlen(hello));
   if(ret < 0)
     fatal("[-] initialize_client hello");
+
+  pinfo = recv_packet(sock_fd);
+  if(pinfo == NULL || pinfo->opcode != INIT_INFO)
+    fatal("[-] get initializtion information");
+
+  status = packet_data(pinfo);
+  if(status == NULL)
+    fatal("[-] get initializtion information");
+
+  exec_tmout = status->exec_tmout;
+  havoc_div = status->havoc_div;
 
   memset(seed_cache, 0, sizeof(seed_cache));
 
@@ -4291,11 +4306,13 @@ static s32 get_seed_id(u8 *fn) {
 }
 
 
-static struct queue_entry* save_seed(char** argv, void *mem, u32 len, uint32_t id) {
+static struct queue_entry* save_seed(char** argv, seed_info_t *seed_info, uint32_t id) {
   
   u8 res;
   u8* fn = "";
   s32 fd;
+  void* mem = seed_info->content;
+  u32 len = seed_info->seed_len;
   struct queue_entry *seed_entry = NULL;
 
   fn = alloc_printf("%s/cache/id_%06u", out_dir, queued_paths);
@@ -4304,7 +4321,7 @@ static struct queue_entry* save_seed(char** argv, void *mem, u32 len, uint32_t i
 
   seed_entry->fname          = fn;
   seed_entry->len            = len;
-  seed_entry->depth          = cur_depth + 1;
+  seed_entry->depth          = seed_info->depth;
   seed_entry->passed_det     = 0;
   seed_entry->exec_cksum     = 0;
   
@@ -4313,7 +4330,7 @@ static struct queue_entry* save_seed(char** argv, void *mem, u32 len, uint32_t i
   queued_paths++;
   cycles_wo_finds = 0;
 
-  res = calibrate_case(argv, seed_entry, mem, 0, 0);
+  res = calibrate_case(argv, seed_entry, mem, seed_info->handicap, 0);
   if (res == FAULT_ERROR)
     goto out_err;
   
@@ -4354,7 +4371,7 @@ static struct queue_entry* request_seed(char** argv, u8* mutation_type, u8 rando
   if (task_pinfo == NULL) fatal("new_packet");
 
   ret = send_packet(sock_fd, task_pinfo);
-  if (ret < 0) goto sock_err;
+  if (ret <= 0) goto sock_err;
 
   free(task_pinfo);
 
@@ -4378,7 +4395,7 @@ static struct queue_entry* request_seed(char** argv, u8* mutation_type, u8 rando
     if (seed_pinfo == NULL) fatal("new_packet");
 
     ret = send_packet(sock_fd, seed_pinfo);
-    if (ret < 0) goto sock_err;
+    if (ret <= 0) goto sock_err;
 
     free(seed_pinfo);
     
@@ -4393,7 +4410,7 @@ static struct queue_entry* request_seed(char** argv, u8* mutation_type, u8 rando
     if (fault == FAULT_ERROR)
       FATAL("Unable to execute target application");
 
-    seed_entry = save_seed(argv, seed->content, seed->seed_len, seed_id);
+    seed_entry = save_seed(argv, seed, seed_id);
     if (seed_entry == NULL) goto out_seed;
 
   }
@@ -5295,7 +5312,7 @@ skip_user_extras:
  * out_buf  - content of the case
  */
 
-static u8 mutation_havoc_splicing(char** argv, s32 len, u8** p_out_buf, u8** p_in_buf){
+static u8 mutation_havoc_splicing(char** argv, s32 len, u8** p_out_buf, u8** p_in_buf, u8 doing_det){
 
   s32 temp_len, fd, i;
   u8  *orig_in, *in_buf, *out_buf;
@@ -5317,7 +5334,7 @@ havoc_stage:
 
     stage_name  = "havoc";
     stage_short = "havoc";
-    stage_max   = (use_splicing ? HAVOC_CYCLES : HAVOC_CYCLES_INIT) * 
+    stage_max   = (doing_det ? HAVOC_CYCLES : HAVOC_CYCLES_INIT) * 
                   perf_score / havoc_div / 100;
 
   } else {
@@ -5329,8 +5346,7 @@ havoc_stage:
     sprintf(tmp, "splice %u", splice_cycle);
     stage_name  = tmp;
     stage_short = "splice";
-    stage_max   = (use_splicing ? HAVOC_CYCLES : HAVOC_CYCLES_INIT) * 
-                  perf_score / havoc_div / 100;
+    stage_max   = SPLICE_HAVOC * perf_score / havoc_div / 100;
 
   }
 
@@ -5347,7 +5363,7 @@ havoc_stage:
 
   for (stage_cur = 0; stage_cur < stage_max; stage_cur++) {
 
-    u32 use_stacking = 1 << (1 + UR(HAVOC_STACK_POW2));
+    u32 use_stacking = 1 + UR(1 << (HAVOC_STACK_POW2 + 1));
 
     stage_cur_val = use_stacking;
  
@@ -5794,7 +5810,7 @@ retry_splicing:
 
     /* Pick a random queue entry and seek to it. Don't splice with yourself. */
 
-    for(i = 0; i < 16; i++) {
+    for (i = 0; i < 16; i++) {
       
       target = request_seed(argv, &mutation_type, 1);
       if(target && target->len >= 2)
@@ -5802,6 +5818,7 @@ retry_splicing:
 
     }
     
+    if (stop_soon) return 1; 
     /* Read the testcase into a new buffer. */
 
     fd = open(target->fname, O_RDONLY);
@@ -5967,13 +5984,17 @@ static u8 fuzz_one(char** argv, u8 mutation_type) {
       mutation_extras(argv, len, out_buf, in_buf);
       break;
 
+    case M_HAVOC_A:
+      mutation_havoc_splicing(argv, len, &out_buf, &in_buf, 1);
+      break;
+
     case M_HAVOC:
-      mutation_havoc_splicing(argv, len, &out_buf, &in_buf);
+      mutation_havoc_splicing(argv, len, &out_buf, &in_buf, 0);
       break;
 
     case M_SPLICE:
       use_splicing = 1;
-      mutation_havoc_splicing(argv, len, &out_buf, &in_buf);
+      mutation_havoc_splicing(argv, len, &out_buf, &in_buf, 0);
       use_splicing = 0;
   }
 

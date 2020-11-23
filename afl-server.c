@@ -4557,6 +4557,8 @@ static int handle_new_client(int listen_fd) {
   int ret;
   char *hello = "hgy", buf[8];
   tcp_socket_info si;
+  packet_info_t *pinfo;
+  init_status_t status;
 
   si.sfd = accept4(listen_fd, (struct sockaddr*)&si.sock_addr, 
                     &si.sock_len, SOCK_NONBLOCK);
@@ -4569,6 +4571,20 @@ static int handle_new_client(int listen_fd) {
     return ret;
   }
 
+  status.exec_tmout = exec_tmout;
+  status.havoc_div = havoc_div;
+
+  pinfo = new_packet(INIT_INFO, &status, sizeof(status));
+  if(pinfo == NULL)
+    fatal("[-] new packet");
+
+  ret = send_packet(si.sfd, pinfo);
+  if (ret <= 0) {
+    close(si.sfd);
+    si.sfd = -1;
+  }
+
+  free(pinfo);
   return si.sfd;
 
 }
@@ -4683,7 +4699,7 @@ retry_random:
 
     }
 
-    /* 若完成了确定性变异 下一个是havoc */
+    /* 若未完成确定性变异 下一个是havoc */
     if (!seed_entry->was_fuzzed && seed_entry->doing_det == M_HAVOC) {
       
       mark_as_det_done(queue_cur);
@@ -4692,6 +4708,7 @@ retry_random:
       if(seed_entry->favored)
         pending_favored--;
 
+      *stage = M_HAVOC_A;
       goto next;
 
     }
@@ -4736,6 +4753,7 @@ static int handle_put_seed(char** argv, packet_info_t *pinfo) {
 
   pthread_mutex_lock(&seed_queue_mutex);
 
+  cur_depth = seed_info->depth;
   queued_imported += save_if_interesting(argv, 
                       seed_info->content, seed_len, fault);
 
@@ -4774,6 +4792,8 @@ static int handle_get_task(int cfd, packet_info_t *pinfo) {
   seed->flag = flag;
   seed->seed_len = seed_entry->len;
   seed->size = seed_size;
+  seed->depth = seed_entry->depth;
+  seed->handicap = seed_entry->handicap;
   strcpy(seed->content, fname);
 
   resp = new_packet(GET_TASK, seed, seed->size);
@@ -4781,7 +4801,7 @@ static int handle_get_task(int cfd, packet_info_t *pinfo) {
     fatal("[-] new_packet");
 
   ret = send_packet(cfd, resp);
-  if (ret < 0)
+  if (ret <= 0)
     close(cfd);
 
   free(resp);
@@ -4812,6 +4832,8 @@ static int handle_get_seed(int cfd, packet_info_t *pinfo) {
 
   new_seed->size = sizeof(seed_info_t) + seed_len;
   new_seed->flag = seed->flag;
+  new_seed->depth = seed->depth;
+  new_seed->handicap = seed->handicap;
   new_seed->seed_len = seed_len;
 
   fd = open(fname, O_RDONLY);
@@ -4833,7 +4855,7 @@ do_resp:
     fatal("[-] new_packet");
 
   ret = send_packet(cfd, resp);
-  if(ret < 0)
+  if(ret <= 0)
     close(cfd);
   
   free(resp);
@@ -4877,7 +4899,7 @@ static int handle_sync_bitmap(int cfd, packet_info_t *pinfo) {
   pthread_mutex_unlock(&bitmap_mutex);
 
   ret = send_packet(cfd, resp);
-  if(ret < 0)
+  if(ret <= 0)
     close(cfd);
 
   free(resp);

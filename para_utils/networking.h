@@ -12,6 +12,7 @@
 #define PUT_STATUS  3   /* 节点上传状态信息 */
 #define SYNC_BITMAP 4   /* 请求同步位图 */
 #define CHECK_DUP   5   /* 实验用 查询种子是否重复 */
+#define INIT_INFO   6   /* 节点初始化 */
 
 /* 策略选择 */
 #define M_BITFLIP   5
@@ -20,6 +21,7 @@
 #define M_EXTRAS    2
 #define M_HAVOC     1
 #define M_SPLICE    0
+#define M_HAVOC_A   8   /* 第一次HAVOC */
 
 
 #ifdef DUP_TEST
@@ -41,11 +43,21 @@ typedef struct node_status {
 } node_status_t;
 
 
+typedef struct init_status {
+
+  uint32_t havoc_div;
+  uint32_t exec_tmout;
+
+} init_status_t;
+
+
 typedef struct seed_info {
 
   uint32_t size;            /* 总长度 */
   uint32_t flag;            /* 策略选择 */ 
   uint32_t seed_len;        /* 种子长度 */
+  uint64_t handicap;
+  uint64_t depth;
   uint8_t content[0];
 
 } seed_info_t;
