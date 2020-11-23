@@ -4471,7 +4471,7 @@ static u8 mutation_bit_flip(char** argv, s32 len, u8* out_buf){
 
   stage_val_type = STAGE_VAL_NONE;
 
-  orig_hit_cnt = queued_paths + unique_crashes;
+  orig_hit_cnt = queued_discovered + unique_crashes;
 
   prev_cksum = queue_cur->exec_cksum;
 
@@ -4554,7 +4554,7 @@ static u8 mutation_bit_flip(char** argv, s32 len, u8* out_buf){
 
   }
 
-  new_hit_cnt = queued_paths + unique_crashes;
+  new_hit_cnt = queued_discovered + unique_crashes;
 
   stage_finds[STAGE_FLIP1]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_FLIP1] += stage_max;
@@ -4581,7 +4581,7 @@ static u8 mutation_bit_flip(char** argv, s32 len, u8* out_buf){
 
   }
 
-  new_hit_cnt = queued_paths + unique_crashes;
+  new_hit_cnt = queued_discovered + unique_crashes;
 
   stage_finds[STAGE_FLIP2]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_FLIP2] += stage_max;
@@ -4612,7 +4612,7 @@ static u8 mutation_bit_flip(char** argv, s32 len, u8* out_buf){
 
   }
 
-  new_hit_cnt = queued_paths + unique_crashes;
+  new_hit_cnt = queued_discovered + unique_crashes;
 
   stage_finds[STAGE_FLIP4]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_FLIP4] += stage_max;
@@ -4637,7 +4637,7 @@ static u8 mutation_bit_flip(char** argv, s32 len, u8* out_buf){
 
   }
 
-  new_hit_cnt = queued_paths + unique_crashes;
+  new_hit_cnt = queued_discovered + unique_crashes;
 
   stage_finds[STAGE_FLIP8]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_FLIP8] += stage_max;
@@ -4666,7 +4666,7 @@ static u8 mutation_bit_flip(char** argv, s32 len, u8* out_buf){
 
   }
 
-  new_hit_cnt = queued_paths + unique_crashes;
+  new_hit_cnt = queued_discovered + unique_crashes;
 
   stage_finds[STAGE_FLIP16]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_FLIP16] += stage_max;
@@ -4695,7 +4695,7 @@ static u8 mutation_bit_flip(char** argv, s32 len, u8* out_buf){
 
   }
 
-  new_hit_cnt = queued_paths + unique_crashes;
+  new_hit_cnt = queued_discovered + unique_crashes;
 
   stage_finds[STAGE_FLIP32]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_FLIP32] += stage_max;
@@ -4727,7 +4727,7 @@ static u8 mutation_arith(char** argv, s32 len, u8* out_buf){
 
   stage_val_type = STAGE_VAL_LE;
 
-  orig_hit_cnt = queued_paths + unique_crashes;
+  orig_hit_cnt = queued_discovered + unique_crashes;
 
   for (i = 0; i < len; i++) {
 
@@ -4770,7 +4770,7 @@ static u8 mutation_arith(char** argv, s32 len, u8* out_buf){
 
   }
 
-  new_hit_cnt = queued_paths + unique_crashes;
+  new_hit_cnt = queued_discovered + unique_crashes;
 
   stage_finds[STAGE_ARITH8]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_ARITH8] += stage_max;
@@ -4857,7 +4857,7 @@ static u8 mutation_arith(char** argv, s32 len, u8* out_buf){
 
   }
 
-  new_hit_cnt = queued_paths + unique_crashes;
+  new_hit_cnt = queued_discovered + unique_crashes;
 
   stage_finds[STAGE_ARITH16]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_ARITH16] += stage_max;
@@ -4941,7 +4941,7 @@ static u8 mutation_arith(char** argv, s32 len, u8* out_buf){
 
   }
 
-  new_hit_cnt = queued_paths + unique_crashes;
+  new_hit_cnt = queued_discovered + unique_crashes;
 
   stage_finds[STAGE_ARITH32]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_ARITH32] += stage_max;
@@ -4968,7 +4968,7 @@ static u8 mutation_interest(char** argv, s32 len, u8* out_buf){
 
   stage_val_type = STAGE_VAL_LE;
 
-  orig_hit_cnt = queued_paths + unique_crashes;
+  orig_hit_cnt = queued_discovered + unique_crashes;
 
   /* Setting 8-bit integers. */
 
@@ -5000,7 +5000,7 @@ static u8 mutation_interest(char** argv, s32 len, u8* out_buf){
 
   }
 
-  new_hit_cnt = queued_paths + unique_crashes;
+  new_hit_cnt = queued_discovered + unique_crashes;
 
   stage_finds[STAGE_INTEREST8]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_INTEREST8] += stage_max;
@@ -5061,7 +5061,7 @@ static u8 mutation_interest(char** argv, s32 len, u8* out_buf){
 
   }
 
-  new_hit_cnt = queued_paths + unique_crashes;
+  new_hit_cnt = queued_discovered + unique_crashes;
 
   stage_finds[STAGE_INTEREST16]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_INTEREST16] += stage_max;
@@ -5122,7 +5122,7 @@ static u8 mutation_interest(char** argv, s32 len, u8* out_buf){
 
   }
 
-  new_hit_cnt = queued_paths + unique_crashes;
+  new_hit_cnt = queued_discovered + unique_crashes;
 
   stage_finds[STAGE_INTEREST32]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_INTEREST32] += stage_max;
@@ -5155,7 +5155,7 @@ static u8 mutation_extras(char** argv, s32 len, u8* out_buf, u8* in_buf){
 
   stage_val_type = STAGE_VAL_NONE;
 
-  orig_hit_cnt = queued_paths + unique_crashes;
+  orig_hit_cnt = queued_discovered + unique_crashes;
 
   for (i = 0; i < len; i++) {
 
@@ -5198,7 +5198,7 @@ static u8 mutation_extras(char** argv, s32 len, u8* out_buf, u8* in_buf){
 
   }
 
-  new_hit_cnt = queued_paths + unique_crashes;
+  new_hit_cnt = queued_discovered + unique_crashes;
 
   stage_finds[STAGE_EXTRAS_UO]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_EXTRAS_UO] += stage_max;
@@ -5247,7 +5247,7 @@ static u8 mutation_extras(char** argv, s32 len, u8* out_buf, u8* in_buf){
 
   ck_free(ex_tmp);
 
-  new_hit_cnt = queued_paths + unique_crashes;
+  new_hit_cnt = queued_discovered + unique_crashes;
 
   stage_finds[STAGE_EXTRAS_UI]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_EXTRAS_UI] += stage_max;
@@ -5263,7 +5263,7 @@ skip_user_extras:
 
   stage_val_type = STAGE_VAL_NONE;
 
-  orig_hit_cnt = queued_paths + unique_crashes;
+  orig_hit_cnt = queued_discovered + unique_crashes;
 
   for (i = 0; i < len; i++) {
 
@@ -5297,7 +5297,7 @@ skip_user_extras:
 
   }
 
-  new_hit_cnt = queued_paths + unique_crashes;
+  new_hit_cnt = queued_discovered + unique_crashes;
 
   stage_finds[STAGE_EXTRAS_AO]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_EXTRAS_AO] += stage_max;
@@ -5354,9 +5354,9 @@ havoc_stage:
 
   temp_len = len;
 
-  orig_hit_cnt = queued_paths + unique_crashes;
+  orig_hit_cnt = queued_discovered + unique_crashes;
 
-  havoc_queued = queued_paths;
+  havoc_queued = queued_discovered;
 
   /* We essentially just do several thousand runs (depending on perf_score)
      where we take the input file and make random stacked tweaks. */
@@ -5755,20 +5755,20 @@ havoc_stage:
     /* If we're finding new stuff, let's run for a bit longer, limits
        permitting. */
 
-    if (queued_paths != havoc_queued) {
+    if (queued_discovered != havoc_queued) {
 
       if (perf_score <= HAVOC_MAX_MULT * 100) {
         stage_max  *= 2;
         perf_score *= 2;
       }
 
-      havoc_queued = queued_paths;
+      havoc_queued = queued_discovered;
 
     }
 
   }
 
-  new_hit_cnt = queued_paths + unique_crashes;
+  new_hit_cnt = queued_discovered + unique_crashes;
 
   if (!splice_cycle) {
     stage_finds[STAGE_HAVOC]  += new_hit_cnt - orig_hit_cnt;
