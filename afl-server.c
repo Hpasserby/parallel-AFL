@@ -312,9 +312,7 @@ typedef struct request_task {
 /* 任务队列 */
 static queue_t *request_queue;
 /* 当前任务线程数 */
-static uint32_t cur_thread_num;
-/* 任务线程数互斥锁 */
-static pthread_mutex_t thread_num_mutex;
+static volatile uint32_t cur_thread_num;
 
 /* 种子队列互斥锁 */
 static pthread_mutex_t seed_queue_mutex;
@@ -4557,13 +4555,18 @@ static void show_init_stats(void) {
 
 static int handle_new_client(int listen_fd) {
 
+  int ret;
+  char *hello = "hello", buf[8];
   tcp_socket_info si;
 
   si.sfd = accept4(listen_fd, (struct sockaddr*)&si.sock_addr, 
                     &si.sock_len, SOCK_NONBLOCK);
-
   if(si.sfd < 0)
     return si.sfd;
+
+  ret = recv_data(si.sfd, buf, strlen(hello));
+  if(ret < 0 || memcmp(buf, hello, strlen(hello)))
+    return ret;
 
   return si.sfd;
 
@@ -5057,9 +5060,7 @@ out:
 #endif
   
   show_stats();
-  pthread_mutex_lock(&thread_num_mutex);
-  --cur_thread_num;
-  pthread_mutex_unlock(&thread_num_mutex);
+  __sync_sub_and_fetch(&cur_thread_num, 1);
   return NULL;
 
 }
@@ -5088,7 +5089,6 @@ static int handle_request(char** argv, int client_fd) {
   task->fd = client_fd;
   task->pinfo = pinfo;
 
-  pthread_mutex_lock(&thread_num_mutex);
   if(cur_thread_num < MAX_THREAD_COUNT) {
     
     pthread_t tid;
@@ -5096,10 +5096,9 @@ static int handle_request(char** argv, int client_fd) {
     if(ret < 0)
       perror("[-] pthread_create");
     else
-      ++cur_thread_num;
+      __sync_add_and_fetch(&cur_thread_num, 1);
 
   }
-  pthread_mutex_unlock(&thread_num_mutex);
 
   push_queue(request_queue, task);
 
@@ -5122,7 +5121,6 @@ static int initialize_server() {
     fatal("[-] initialize_server");
 
   cur_thread_num = 0;
-  pthread_mutex_init(&thread_num_mutex, NULL);
   pthread_mutex_init(&seed_queue_mutex, NULL);
   pthread_mutex_init(&bitmap_mutex, NULL);
 

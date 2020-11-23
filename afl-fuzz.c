@@ -4166,9 +4166,16 @@ static u8 could_be_interest(u32 old_val, u32 new_val, u8 blen, u8 check_le) {
 
 static int initialize_client() {
 
+  int ret;
+  char *hello = "hello";
+
   sock_fd = get_tcp_client(ip, port);
   if (sock_fd < 0)
     fatal("[-] get_tcp_client");
+
+  ret = send_data(sock_fd, hello, strlen(hello));
+  if(ret < 0)
+    fatal("[-] initialize_client hello");
 
   memset(seed_cache, 0, sizeof(seed_cache));
 

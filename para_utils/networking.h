@@ -72,6 +72,9 @@ tcp_socket_info* get_tcp_socket(const char *ip, uint32_t port);
 int get_tcp_server(uint32_t port);
 int get_tcp_client(const char *ip, uint32_t port);
 
+int recv_data(int fd, void* buf, size_t nr);
+int send_data(int fd, void* buf, size_t nr);
+
 packet_info_t* new_packet(uint32_t cmd, void *data, size_t data_len);
 packet_info_t* recv_packet(int fd);
 int send_packet(int fd, packet_info_t* pinfo);
