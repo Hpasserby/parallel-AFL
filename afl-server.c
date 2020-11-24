@@ -4662,7 +4662,7 @@ retry_random:
 
     }
    
-    if(queue_cur->doing_det != M_BITFLIP && !queue->was_fuzzed)
+    if(queue_cur->doing_det != M_BITFLIP && !queue_cur->was_fuzzed)
       goto skip_prob;
 
 #ifdef IGNORE_FINDS
