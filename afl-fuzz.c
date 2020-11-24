@@ -5334,7 +5334,7 @@ havoc_stage:
 
     stage_name  = "havoc";
     stage_short = "havoc";
-    stage_max   = (doing_det ? HAVOC_CYCLES : HAVOC_CYCLES_INIT) * 
+    stage_max   = (doing_det ?  HAVOC_CYCLES_INIT : HAVOC_CYCLES) * 
                   perf_score / havoc_div / 100;
 
   } else {
