@@ -932,6 +932,8 @@ static inline u8 has_new_bits(u8* virgin_map) {
 
   u8   ret = 0;
 
+  pthread_mutex_lock(&bitmap_mutex);
+
   while (i--) {
 
     /* Optimize for (*current & *virgin) == 0 - i.e., no bits in current bitmap
@@ -976,6 +978,8 @@ static inline u8 has_new_bits(u8* virgin_map) {
   }
 
   if (ret && virgin_map == virgin_bits) bitmap_changed = 1;
+
+  pthread_mutex_unlock(&bitmap_mutex);
 
   return ret;
 
@@ -3152,7 +3156,7 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
     if (!(hnb = has_new_bits(virgin_bits))) {
       if (crash_mode) total_crashes++;
       return 0;
-    }    
+    }
 
 #ifndef SIMPLE_FILES
 
