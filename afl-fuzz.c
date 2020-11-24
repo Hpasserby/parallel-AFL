@@ -5375,7 +5375,7 @@ havoc_stage:
 
   for (stage_cur = 0; stage_cur < stage_max; stage_cur++) {
 
-    u32 use_stacking = 1 + UR(1 << (HAVOC_STACK_POW2 + 1));
+    u32 use_stacking = 1 << (1 + UR(HAVOC_STACK_POW2 + 1));
 
     stage_cur_val = use_stacking;
  
