@@ -77,6 +77,7 @@
 
 #ifdef DUP_TEST
 #include <mysql/mysql.h>
+#include <mysql/mysqld_error.h>
 #endif /* DUP_TEST */
 
 #if defined(__APPLE__) || defined(__FreeBSD__) || defined (__OpenBSD__)
@@ -4925,9 +4926,8 @@ static MYSQL* initialize_mysql() {
 
 static int handle_check_dup(MYSQL* mysql, packet_info_t *pinfo) {
 
-  int ret = -1, exist = 0;
+  int ret = -1;
   exec_info_t *exec_info;
-  MYSQL_RES *rs;
   char sql[256] = {'\0'};
 
   exec_info = (exec_info_t*)packet_data(pinfo);
@@ -4945,8 +4945,14 @@ static int handle_check_dup(MYSQL* mysql, packet_info_t *pinfo) {
 
   if(ret) { 
     
-    total_dup++;
-    dup_cnt[exec_info->mut_stage]++;
+    if(mysql_errno(mysql) == ER_DUP_ENTRY) {
+      total_dup++;
+      dup_cnt[exec_info->mut_stage]++;
+    } else {
+      fprintf(stderr, "[-] mysql error: %s", mysql_error(mysql));
+      stop_soon = 1;
+      return -1;
+    }
 
   }
 
