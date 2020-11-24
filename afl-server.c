@@ -331,8 +331,8 @@ static uint32_t port;
 #define MYSQL_PASS  "hgy5945"
 #define MYSQL_DB    "fuzz"
 
-static u64 dup_cnt[M_BITFLIP + 2];
-static u64 mut_cnt[M_BITFLIP + 2];
+static u64 dup_cnt[16];
+static u64 mut_cnt[16];
 static u64 total_dup;
 
 #endif /*DUP_TEST */
@@ -4940,29 +4940,11 @@ static int handle_check_dup(MYSQL* mysql, packet_info_t *pinfo) {
     mysql = initialize_mysql();
 
   exec_info->seed_hash[32] = '\0';
-  sprintf(sql, "SELECT * FROM seeds where id = '%s'", exec_info->seed_hash);
- 
+  sprintf(sql, "INSERT INTO seeds (id) VALUES (\"%s\")", exec_info->seed_hash);
   ret = mysql_query(mysql, sql);
-  if(ret) {
-    fprintf(stderr, "[-] mysql query failed\n");
-    return ret;
-  }
 
-  rs = mysql_store_result(mysql);
-  if(rs == NULL) {
-    fprintf(stderr, "[-] mysql query failed\n");
-  }
-  while(mysql_fetch_row(rs))
-    exist = 1;
-  mysql_free_result(rs);
-  
-  if(!exist) { 
-
-    sprintf(sql, "INSERT INTO seeds (id) VALUES (\"%s\")", exec_info->seed_hash);
-    mysql_query(mysql, sql);
-
-  } else {
-
+  if(ret) { 
+    
     total_dup++;
     dup_cnt[exec_info->mut_stage]++;
 

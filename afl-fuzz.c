@@ -3797,7 +3797,7 @@ static u8 check_duplicate(u8* out_buf, u32 len) {
   MD5Final(&md5, md5_value);
   md5_string = MD5toString(md5_value);
 
-  einfo.mut_stage = cur_mutation;
+  einfo.mut_stage = cur_mutation == M_HAVOC_A ? M_HAVOC : cur_mutation;
   memcpy(einfo.seed_hash, md5_string, 32);
 
   pinfo = new_packet(CHECK_DUP, &einfo, sizeof(einfo));
