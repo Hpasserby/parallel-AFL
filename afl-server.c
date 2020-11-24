@@ -1517,7 +1517,7 @@ static void read_testcases(void) {
        fuzzing when resuming aborted scans, because it would be pointless
        and probably very time-consuming. */
 
-    if (!access(dfn, F_OK)) doing_det = 0;
+    if (!access(dfn, F_OK)) doing_det = M_HAVOC;
     ck_free(dfn);
 
     add_to_queue(fn, st.st_size, doing_det);
