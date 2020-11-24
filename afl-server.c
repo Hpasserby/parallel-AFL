@@ -4880,26 +4880,9 @@ do_resp:
 static int handle_sync_bitmap(int cfd, packet_info_t *pinfo) {
 
   int ret = -1;
-  u8 *bitmap;
-  u64 *current, *virgin;
-  u32  i = (MAP_SIZE >> 3);
   packet_info_t *resp;
 
-  bitmap = (u8*)packet_data(pinfo);
-
-  i = MAP_SIZE >> 3;
-
-  current = (u64*)bitmap;
-  virgin = (u64*)virgin_bits;
-
   pthread_mutex_lock(&bitmap_mutex);
-
-  if(bitmap != NULL)
-    while (i--) {
-      *virgin &= *current;
-      virgin++;
-      current++;
-    }
 
   resp = new_packet(SYNC_BITMAP, virgin_bits, MAP_SIZE);
   if(resp == NULL)

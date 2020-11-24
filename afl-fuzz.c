@@ -783,9 +783,11 @@ static s32 sync_bitmap() {
 
   int ret;
   u8 *bitmap; 
+  u64 *current, *virgin;
+  u32 i = (MAP_SIZE >> 3);
   packet_info_t *pinfo;
 
-  pinfo = new_packet(SYNC_BITMAP, virgin_bits, MAP_SIZE);
+  pinfo = new_packet(SYNC_BITMAP, NULL, 0);
   if(pinfo == NULL) fatal("[-] new_packet");
 
   ret = send_packet(sock_fd, pinfo);
@@ -798,8 +800,16 @@ static s32 sync_bitmap() {
     goto sock_err;
 
   bitmap = packet_data(pinfo);
-  if(bitmap != NULL) {
-    memcpy(virgin_bits, bitmap, MAP_SIZE);
+  if(bitmap == NULL)
+    return -1;
+
+  current = (u64*)bitmap;
+  virgin = (u64*)virgin_bits;
+
+  while (i--) {
+    *virgin &= *current;
+    virgin++;
+    current++;
   }
 
   free(pinfo);
@@ -2449,7 +2459,7 @@ abort_calibration:
 static u8 upload_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
 
   s32 ret;
-  u8  hnb;
+  u8  hnb, keeping = 0;
   packet_info_t *pinfo;
   seed_info_t *seed_info;
 
@@ -2461,6 +2471,8 @@ static u8 upload_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
     }
   
     last_path_time = get_cur_time();
+
+    keeping = 1;
 
     goto do_upload;
 
@@ -2480,7 +2492,7 @@ static u8 upload_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
         simplify_trace((u32*)trace_bits);
 #endif /* ^WORD_SIZE_64 */
 
-        if (!has_new_bits(virgin_tmout)) return 0;
+        if (!has_new_bits(virgin_tmout)) return keeping;
 
       }
       
@@ -2498,7 +2510,7 @@ static u8 upload_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
 
         if (!stop_soon && new_fault == FAULT_CRASH) goto keep_as_crash;
 
-        if (stop_soon || new_fault != FAULT_TMOUT) return 0;
+        if (stop_soon || new_fault != FAULT_TMOUT) return keeping;
 
       }
 
@@ -2522,7 +2534,7 @@ keep_as_crash:
         simplify_trace((u32*)trace_bits);
 #endif /* ^WORD_SIZE_64 */
 
-        if (!has_new_bits(virgin_crash)) return 0;
+        if (!has_new_bits(virgin_crash)) return keeping;
 
         unique_crashes++;
         
@@ -2537,7 +2549,7 @@ keep_as_crash:
       FATAL("Unable to execute target application");
 
     default:
-      return 0; 
+      return keeping; 
 
   }
 
@@ -2566,7 +2578,7 @@ do_upload:
   
   free(pinfo);
   free(seed_info);
-  return !!ret;
+  return keeping;
 
 }
 
