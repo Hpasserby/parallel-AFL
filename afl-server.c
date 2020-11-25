@@ -4905,6 +4905,8 @@ static int handle_sync_bitmap(int cfd, packet_info_t *pinfo) {
 
 static MYSQL* initialize_mysql() {
   
+  u8 val;
+  s32 ret;
   MYSQL* mysql;
  
   mysql = mysql_init(NULL);
@@ -4912,6 +4914,14 @@ static MYSQL* initialize_mysql() {
     fprintf(stderr, "[-] mysql_init failed\n");
     exit(1);
   }
+
+  val = 1;
+  ret = mysql_options(mysql, MYSQL_OPT_RECONNECT, &val);
+  if(ret != 0) {
+    fprintf(stderr, "[-] mysql_options error\n");
+    exit(1);
+  }
+
   mysql = mysql_real_connect(mysql, MYSQL_HOST, MYSQL_USER, 
                               MYSQL_PASS, MYSQL_DB, 0, NULL, 0);
   if(mysql == NULL) {
