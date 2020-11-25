@@ -4560,7 +4560,7 @@ static void show_init_stats(void) {
 static int handle_new_client(int listen_fd) {
 
   int ret;
-  char *hello = "hgy", buf[8];
+  char *hello = "hgy", buf[8] = {'\0'};
   tcp_socket_info si;
   packet_info_t *pinfo;
   init_status_t status;
@@ -4570,7 +4570,9 @@ static int handle_new_client(int listen_fd) {
   if(si.sfd < 0)
     return si.sfd;
 
-  ret = recv_data(si.sfd, buf, strlen(hello));
+  sleep(1);
+
+  ret = recv(si.sfd, buf, strlen(hello), MSG_DONTWAIT);
   if(ret < 0 || memcmp(buf, hello, strlen(hello))) {
     close(si.sfd);
     return ret;
