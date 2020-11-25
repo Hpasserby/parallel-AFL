@@ -23,5 +23,6 @@ afl-llvm-rt.o
 *.[oa]
 *.swp
 *.bak
-.workspace.vim
+.*
+compile_commands.json
 tags
