@@ -255,7 +255,7 @@ struct queue_entry {
   u8  cal_failed,                     /* Calibration failed?              */
       trim_done,                      /* Trimmed?                         */
       was_fuzzed,                     /* Had any fuzzing done yet?        */
-      doing_det,                      /* Deterministic stages passed?     */
+      stage_bits,                     /* 记录当前已经完成的变异阶段       */
       has_new_cov,                    /* Triggers new coverage?           */
       var_behavior,                   /* Variable behavior?               */
       favored,                        /* Currently favored?               */
@@ -746,8 +746,6 @@ static void mark_as_det_done(struct queue_entry* q) {
 
   ck_free(fn);
 
-  q->doing_det = M_HAVOC;
-
 }
 
 
@@ -811,14 +809,14 @@ static void mark_as_redundant(struct queue_entry* q, u8 state) {
 
 /* Append new test case to the queue. */
 
-static void add_to_queue(u8* fname, u32 len, u8 doing_det) {
+static void add_to_queue(u8* fname, u32 len, u8 stage_bits) {
 
   struct queue_entry* q = ck_alloc(sizeof(struct queue_entry));
 
   q->fname        = fname;
   q->len          = len;
   q->depth        = cur_depth + 1;
-  q->doing_det   = doing_det;
+  q->stage_bits   = stage_bits;
 
   if (q->depth > max_depth) max_depth = q->depth;
 
@@ -1492,7 +1490,7 @@ static void read_testcases(void) {
     u8* fn = alloc_printf("%s/%s", in_dir, nl[i]->d_name);
     u8* dfn = alloc_printf("%s/.state/deterministic_done/%s", in_dir, nl[i]->d_name);
 
-    u8  doing_det = M_BITFLIP;
+    u8  stage_bits = M_INIT;
 
     free(nl[i]); /* not tracked */
  
@@ -1518,10 +1516,10 @@ static void read_testcases(void) {
        fuzzing when resuming aborted scans, because it would be pointless
        and probably very time-consuming. */
 
-    if (!access(dfn, F_OK)) doing_det = M_HAVOC;
+    if (!access(dfn, F_OK)) stage_bits = M_FUZZED;
     ck_free(dfn);
 
-    add_to_queue(fn, st.st_size, doing_det);
+    add_to_queue(fn, st.st_size, stage_bits);
 
   }
 
@@ -3035,7 +3033,7 @@ static void pivot_inputs(void) {
 
     /* Make sure that the passed_det value carries over, too. */
 
-    if (q->doing_det == M_HAVOC) mark_as_det_done(q);
+    if (MUT_CHECK(q->stage_bits, M_ALLDET)) mark_as_det_done(q);
 
     q = q->next;
     id++;
@@ -3170,7 +3168,7 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
 
 #endif /* ^!SIMPLE_FILES */
 
-    add_to_queue(fn, len, M_BITFLIP);
+    add_to_queue(fn, len, M_INIT);
 
     if (hnb == 2) {
       queue_top->has_new_cov = 1;
@@ -4597,6 +4595,56 @@ static int handle_new_client(int listen_fd) {
 }
 
 
+static u8 next_stage(struct queue_entry* entry) {
+
+  u8 stage;
+  u8 stage_bits = entry->stage_bits;
+
+  /* 遍历所有策略 */
+  for(stage = M_BITFLIP; stage < M_HAVOC; stage <<= 1) {
+
+    if(MUT_CHECK(stage_bits, stage))
+      continue;
+    
+    // TODO 进行策略的跳过
+
+    MUT_SET(entry->stage_bits, stage);
+    break;
+
+  }
+
+  if(stage == M_HAVOC) {
+
+    /* 完成确定性变异 这是第一次HAVOC */
+    if(!MUT_CHECK(stage_bits, M_HAVOC_A) && 
+        MUT_CHECK(stage_bits, M_ALLDET)) {
+
+      stage = M_HAVOC_A;
+      MUT_SET(entry->stage_bits, M_HAVOC_A);
+
+      mark_as_det_done(queue_cur);
+      entry->was_fuzzed = 1;
+      pending_not_fuzzed--;
+      if(entry->favored)
+        pending_favored--;
+    
+    }
+
+    /* 若之前已经fuzz过了 */
+    else if(MUT_CHECK(stage_bits, M_FUZZED)) {
+
+      if (use_splicing && queued_paths > 1)
+        stage = M_SPLICE; 
+
+    }
+
+  }
+
+  return stage;
+
+}
+
+
 static struct queue_entry* next_seed_info(u8 *stage, u8 random_seed) {
 
   struct queue_entry* seed_entry = NULL;
@@ -4665,7 +4713,7 @@ retry_random:
 
     }
    
-    if(queue_cur->doing_det != M_BITFLIP && !queue_cur->was_fuzzed)
+    if(queue_cur->stage_bits != M_INIT && !queue_cur->was_fuzzed)
       goto skip_prob;
 
 #ifdef IGNORE_FINDS
@@ -4698,34 +4746,11 @@ retry_random:
 skip_prob:
 
     seed_entry = queue_cur;
-    *stage = queue_cur->doing_det;
+    *stage = next_stage(queue_cur);
 
-    /* 若已经完成确定性变异和havoc */
-    if (seed_entry->was_fuzzed) {
-
-      /* 判断是否需要splice */
-      if (use_splicing && queued_paths > 1)
-        *stage = M_SPLICE;
-
+    if(*stage & (M_HAVOC | M_HAVOC_A | M_SPLICE))
       goto next;
 
-    }
-
-    /* 若未完成确定性变异 下一个是havoc */
-    if (!seed_entry->was_fuzzed && seed_entry->doing_det == M_HAVOC) {
-      
-      mark_as_det_done(queue_cur);
-      seed_entry->was_fuzzed = 1;
-      pending_not_fuzzed--;
-      if(seed_entry->favored)
-        pending_favored--;
-
-      *stage = M_HAVOC_A;
-      goto next;
-
-    }
-
-    seed_entry->doing_det--;
     break;
 
 next:

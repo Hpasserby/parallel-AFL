@@ -14,16 +14,6 @@
 #define CHECK_DUP   5   /* 实验用 查询种子是否重复 */
 #define INIT_INFO   6   /* 节点初始化 */
 
-/* 策略选择 */
-#define M_BITFLIP   5
-#define M_ARITH     4
-#define M_INTEREST  3
-#define M_EXTRAS    2
-#define M_HAVOC     1
-#define M_SPLICE    0
-#define M_HAVOC_A   8   /* 第一次HAVOC */
-
-
 #ifdef DUP_TEST
 
 typedef struct exec_info {

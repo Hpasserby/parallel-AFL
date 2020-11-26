@@ -359,4 +359,20 @@
 
 // #define IGNORE_FINDS
 
+/* 策略选择 */
+#define M_BITFLIP   (1 << 0)
+#define M_ARITH     (1 << 1)
+#define M_INTEREST  (1 << 2)
+#define M_EXTRAS    (1 << 3)
+#define M_HAVOC     (1 << 4)
+#define M_HAVOC_A   (1 << 5)  /* 第一次HAVOC */
+#define M_SPLICE    (1 << 6)
+
+#define M_INIT      0
+#define M_ALLDET    (M_BITFLIP | M_ARITH | M_INTEREST | M_EXTRAS)       
+#define M_FUZZED    (M_ALLDET | M_HAVOC_A)
+
+#define MUT_CHECK(stage_bits, mut) ((stage_bits & mut) == mut)
+#define MUT_SET(stage_bits, mut) (stage_bits |= mut)
+
 #endif /* ! _HAVE_CONFIG_H */
