@@ -374,5 +374,6 @@
 
 #define MUT_CHECK(stage_bits, mut) ((stage_bits & mut) == mut)
 #define MUT_SET(stage_bits, mut) (stage_bits |= mut)
+#define MUT_IDX(mut) (__builtin_ffs(mut))
 
 #endif /* ! _HAVE_CONFIG_H */

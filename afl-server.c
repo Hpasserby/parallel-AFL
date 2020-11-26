@@ -226,8 +226,8 @@ static s32 stage_cur_byte,            /* Byte offset of current stage op  */
 
 static u8  stage_val_type;            /* Value type (STAGE_VAL_*)         */
 
-static u64 stage_finds[32],           /* Patterns found per fuzz stage    */
-           stage_cycles[32];          /* Execs per fuzz stage             */
+static u64 stage_fnd[8];
+static u64 stage_cnt[8];
 
 static u32 rand_cnt;                  /* Random number counter            */
 
@@ -321,6 +321,8 @@ static pthread_mutex_t seed_queue_mutex;
 static pthread_mutex_t bitmap_mutex;
 /* 执行种子互斥锁 */
 static pthread_mutex_t seed_exec_mutex; 
+/* 状态信息互斥锁 */
+static pthread_mutex_t status_mutex;
 
 /* 监听端口 */
 static uint32_t port;
@@ -4253,36 +4255,41 @@ static void show_stats(void) {
        cRST "%-10s " bSTG bV "\n", tmp, DI(max_depth));
 
   if (!skip_deterministic)
-    sprintf(tmp, "%5s/%5s (%0.02f%%)", DI(dup_cnt[M_BITFLIP]), DI(mut_cnt[M_BITFLIP]), 
-            ((double)dup_cnt[M_BITFLIP]) * 100 / mut_cnt[M_BITFLIP]);
+    sprintf(tmp, "%5s/%5s (%0.02f%%)", 
+        DI(dup_cnt[MUT_IDX(M_BITFLIP)]), DI(mut_cnt[MUT_IDX(M_BITFLIP)]), 
+        ((double)dup_cnt[MUT_IDX(M_BITFLIP)]) * 100 / mut_cnt[MUT_IDX(M_BITFLIP)]);
 
   SAYF(bV bSTOP "   bit flips : " cRST "%-37s " bSTG bV bSTOP "   pending : "
        cRST "%-10s " bSTG bV "\n", tmp, DI(pending_not_fuzzed));
 
   if (!skip_deterministic)
-    sprintf(tmp, "%5s/%5s (%0.02f%%)", DI(dup_cnt[M_ARITH]), DI(mut_cnt[M_ARITH]),
-            ((double)dup_cnt[M_ARITH]) * 100 / mut_cnt[M_ARITH]);
+    sprintf(tmp, "%5s/%5s (%0.02f%%)", 
+        DI(dup_cnt[MUT_IDX(M_ARITH)]), DI(mut_cnt[MUT_IDX(M_ARITH)]),
+        ((double)dup_cnt[MUT_IDX(M_ARITH)]) * 100 / mut_cnt[MUT_IDX(M_ARITH)]);
 
   SAYF(bV bSTOP " arithmetics : " cRST "%-37s " bSTG bV bSTOP "  pend fav : "
        cRST "%-10s " bSTG bV "\n", tmp, DI(pending_favored));
 
   if (!skip_deterministic)
-    sprintf(tmp, "%5s/%5s (%0.02f%%)", DI(dup_cnt[M_INTEREST]), DI(mut_cnt[M_INTEREST]),
-            ((double)dup_cnt[M_INTEREST]) * 100 / mut_cnt[M_INTEREST]);
+    sprintf(tmp, "%5s/%5s (%0.02f%%)", 
+        DI(dup_cnt[MUT_IDX(M_INTEREST)]), DI(mut_cnt[MUT_IDX(M_INTEREST)]),
+        ((double)dup_cnt[MUT_IDX(M_INTEREST)]) * 100 / mut_cnt[MUT_IDX(M_INTEREST)]);
 
   SAYF(bV bSTOP "  known ints : " cRST "%-37s " bSTG bV bSTOP " own finds : "
        cRST "%-10s " bSTG bV "\n", tmp, DI(queued_discovered));
 
   if (!skip_deterministic)
-    sprintf(tmp, "%5s/%5s (%0.02f%%)", DI(dup_cnt[M_EXTRAS]), DI(mut_cnt[M_EXTRAS]), 
-            ((double)dup_cnt[M_EXTRAS]) * 100 / mut_cnt[M_EXTRAS]);
+    sprintf(tmp, "%5s/%5s (%0.02f%%)", 
+        DI(dup_cnt[MUT_IDX(M_EXTRAS)]), DI(mut_cnt[MUT_IDX(M_EXTRAS)]), 
+        ((double)dup_cnt[MUT_IDX(M_EXTRAS)]) * 100 / mut_cnt[MUT_IDX(M_EXTRAS)]);
 
   SAYF(bV bSTOP "  dictionary : " cRST "%-37s " bSTG bV bSTOP
        "  imported : " cRST "%-10s " bSTG bV "\n", tmp,
         DI(queued_imported));
 
-  sprintf(tmp, "%5s/%5s (%0.02f%%)", DI(dup_cnt[M_HAVOC]), DI(mut_cnt[M_HAVOC]), 
-          ((double)dup_cnt[M_HAVOC]) * 100 / mut_cnt[M_HAVOC]);
+  sprintf(tmp, "%5s/%5s (%0.02f%%)", 
+      DI(dup_cnt[MUT_IDX(M_HAVOC)]), DI(mut_cnt[MUT_IDX(M_HAVOC)]), 
+      ((double)dup_cnt[MUT_IDX(M_HAVOC)]) * 100 / mut_cnt[MUT_IDX(M_HAVOC)]);
 
   SAYF(bV bSTOP "       havoc : " cRST "%-37s " bSTG bV bSTOP, tmp);
 
@@ -4291,65 +4298,45 @@ static void show_stats(void) {
   SAYF(bVR bH cCYA bSTOP " fuzzing strategy yields " bSTG bH10 bH bHT bH10
        bH5 bHB bH bSTOP cCYA " path geometry " bSTG bH5 bH2 bH bVL "\n");
 
-  if (skip_deterministic) {
-
-    strcpy(tmp, "n/a, n/a, n/a");
-
-  } else {
-
-    sprintf(tmp, "%s/%s, %s/%s, %s/%s",
-            DI(stage_finds[STAGE_FLIP1]), DI(stage_cycles[STAGE_FLIP1]),
-            DI(stage_finds[STAGE_FLIP2]), DI(stage_cycles[STAGE_FLIP2]),
-            DI(stage_finds[STAGE_FLIP4]), DI(stage_cycles[STAGE_FLIP4]));
-
-  }
-
-  SAYF(bV bSTOP "   bit flips : " cRST "%-37s " bSTG bV bSTOP "    levels : "
-       cRST "%-10s " bSTG bV "\n", tmp, DI(max_depth));
+  SAYF(bV bSTOP "               " cRST "%-37s " bSTG bV bSTOP "    levels : "
+       cRST "%-10s " bSTG bV "\n", " ",  DI(max_depth));
 
   if (!skip_deterministic)
-    sprintf(tmp, "%s/%s, %s/%s, %s/%s",
-            DI(stage_finds[STAGE_FLIP8]), DI(stage_cycles[STAGE_FLIP8]),
-            DI(stage_finds[STAGE_FLIP16]), DI(stage_cycles[STAGE_FLIP16]),
-            DI(stage_finds[STAGE_FLIP32]), DI(stage_cycles[STAGE_FLIP32]));
+    sprintf(tmp, "%5s/%5s (%s/10k)", 
+        DI(stage_fnd[MUT_IDX(M_BITFLIP)]), DI(stage_cnt[MUT_IDX(M_BITFLIP)]), 
+        DF(((double)stage_fnd[MUT_IDX(M_BITFLIP)]) * 10000 / stage_cnt[MUT_IDX(M_BITFLIP)]));
 
-  SAYF(bV bSTOP "  byte flips : " cRST "%-37s " bSTG bV bSTOP "   pending : "
+  SAYF(bV bSTOP "   bit flips : " cRST "%-37s " bSTG bV bSTOP "   pending : "
        cRST "%-10s " bSTG bV "\n", tmp, DI(pending_not_fuzzed));
 
-  
   if (!skip_deterministic)
-    sprintf(tmp, "%s/%s, %s/%s, %s/%s",
-            DI(stage_finds[STAGE_ARITH8]), DI(stage_cycles[STAGE_ARITH8]),
-            DI(stage_finds[STAGE_ARITH16]), DI(stage_cycles[STAGE_ARITH16]),
-            DI(stage_finds[STAGE_ARITH32]), DI(stage_cycles[STAGE_ARITH32]));
+    sprintf(tmp, "%5s/%5s (%s/10k)", 
+        DI(stage_fnd[MUT_IDX(M_ARITH)]), DI(stage_cnt[MUT_IDX(M_ARITH)]),
+        DF(((double)stage_fnd[MUT_IDX(M_ARITH)]) * 10000 / stage_cnt[MUT_IDX(M_ARITH)]));
 
   SAYF(bV bSTOP " arithmetics : " cRST "%-37s " bSTG bV bSTOP "  pend fav : "
        cRST "%-10s " bSTG bV "\n", tmp, DI(pending_favored));
-  
+
   if (!skip_deterministic)
-    sprintf(tmp, "%s/%s, %s/%s, %s/%s",
-            DI(stage_finds[STAGE_INTEREST8]), DI(stage_cycles[STAGE_INTEREST8]),
-            DI(stage_finds[STAGE_INTEREST16]), DI(stage_cycles[STAGE_INTEREST16]),
-            DI(stage_finds[STAGE_INTEREST32]), DI(stage_cycles[STAGE_INTEREST32]));
+    sprintf(tmp, "%5s/%5s (%s/10k)", 
+        DI(stage_fnd[MUT_IDX(M_INTEREST)]), DI(stage_cnt[MUT_IDX(M_INTEREST)]),
+        DF(((double)stage_fnd[MUT_IDX(M_INTEREST)]) * 10000 / stage_cnt[MUT_IDX(M_INTEREST)]));
 
   SAYF(bV bSTOP "  known ints : " cRST "%-37s " bSTG bV bSTOP " own finds : "
        cRST "%-10s " bSTG bV "\n", tmp, DI(queued_discovered));
 
-
   if (!skip_deterministic)
-    sprintf(tmp, "%s/%s, %s/%s, %s/%s",
-            DI(stage_finds[STAGE_EXTRAS_UO]), DI(stage_cycles[STAGE_EXTRAS_UO]),
-            DI(stage_finds[STAGE_EXTRAS_UI]), DI(stage_cycles[STAGE_EXTRAS_UI]),
-            DI(stage_finds[STAGE_EXTRAS_AO]), DI(stage_cycles[STAGE_EXTRAS_AO]));
+    sprintf(tmp, "%5s/%5s (%s/10k)", 
+        DI(stage_fnd[MUT_IDX(M_EXTRAS)]), DI(stage_cnt[MUT_IDX(M_EXTRAS)]), 
+        DF(((double)stage_fnd[MUT_IDX(M_EXTRAS)]) * 10000 / stage_cnt[MUT_IDX(M_EXTRAS)]));
 
   SAYF(bV bSTOP "  dictionary : " cRST "%-37s " bSTG bV bSTOP
        "  imported : " cRST "%-10s " bSTG bV "\n", tmp,
         DI(queued_imported));
 
-
-  sprintf(tmp, "%s/%s, %s/%s",
-          DI(stage_finds[STAGE_HAVOC]), DI(stage_cycles[STAGE_HAVOC]),
-          DI(stage_finds[STAGE_SPLICE]), DI(stage_cycles[STAGE_SPLICE]));
+  sprintf(tmp, "%5s/%5s (%s/10k)", 
+      DI(stage_fnd[MUT_IDX(M_HAVOC)]), DI(stage_cnt[MUT_IDX(M_HAVOC)]), 
+      DF(((double)stage_fnd[MUT_IDX(M_HAVOC)]) * 10000 / stage_cnt[MUT_IDX(M_HAVOC)]));
 
   SAYF(bV bSTOP "       havoc : " cRST "%-37s " bSTG bV bSTOP, tmp);
 
@@ -4393,8 +4380,8 @@ static void show_stats(void) {
 
   }
 
-  SAYF(bV bSTOP "        trim : " cRST "%-37s " bSTG bVR bH20 bH2 bH2 bRB "\n"
-       bLB bH30 bH20 bH2 bH bRB bSTOP cRST RESET_G1, tmp);
+  SAYF(bV bSTOP "               " cRST "%-37s " bSTG bVR bH20 bH2 bH2 bRB "\n"
+       bLB bH30 bH20 bH2 bH bRB bSTOP cRST RESET_G1, " ");
 
   /* Provide some CPU utilization stats. */
 
@@ -4771,7 +4758,7 @@ next:
 
 static int handle_put_seed(char** argv, packet_info_t *pinfo) {
 
-  uint32_t seed_len;
+  uint32_t seed_len, hit_cnt;
   uint8_t fault;
   seed_info_t *seed_info;
 
@@ -4790,9 +4777,14 @@ static int handle_put_seed(char** argv, packet_info_t *pinfo) {
 
   pthread_mutex_lock(&seed_queue_mutex);
 
+  hit_cnt = queued_imported + unique_crashes;
+
   cur_depth = seed_info->depth;
   queued_imported += save_if_interesting(argv, 
                       seed_info->content, seed_len, fault);
+
+  if(hit_cnt != queued_imported + unique_crashes)
+    stage_fnd[MUT_IDX(seed_info->flag)]++;
 
   pthread_mutex_unlock(&seed_queue_mutex);
   pthread_mutex_unlock(&seed_exec_mutex);
@@ -4971,7 +4963,7 @@ static int handle_check_dup(MYSQL* mysql, packet_info_t *pinfo) {
   if(exec_info == NULL)
     return ret;
   
-  mut_cnt[exec_info->mut_stage]++;
+  mut_cnt[MUT_IDX(exec_info->mut_stage)]++;
 
   if(mysql == NULL)
     mysql = initialize_mysql();
@@ -4984,7 +4976,7 @@ static int handle_check_dup(MYSQL* mysql, packet_info_t *pinfo) {
     
     if(mysql_errno(mysql) == ER_DUP_ENTRY) {
       total_dup++;
-      dup_cnt[exec_info->mut_stage]++;
+      dup_cnt[MUT_IDX(exec_info->mut_stage)]++;
     } else {
       fprintf(stderr, "[-] mysql error: %s", mysql_error(mysql));
       stop_soon = 1;
@@ -5002,6 +4994,7 @@ static int handle_check_dup(MYSQL* mysql, packet_info_t *pinfo) {
 
 static int handle_put_status(packet_info_t *pinfo) {
 
+  int i;
   node_status_t *status;
   
   status = (node_status_t*)packet_data(pinfo);
@@ -5009,6 +5002,13 @@ static int handle_put_status(packet_info_t *pinfo) {
     return -1;
 
   __sync_add_and_fetch(&total_execs, status->delta_execs); 
+  
+  if(status->size) {
+    pthread_mutex_lock(&status_mutex);
+    for(i = 0; i < 8; i++)
+      stage_cnt[i] += status->data[i];
+    pthread_mutex_unlock(&status_mutex);
+  }
 
   return 0;
 
@@ -5158,6 +5158,8 @@ static int initialize_server() {
   cur_thread_num = 0;
   pthread_mutex_init(&seed_queue_mutex, NULL);
   pthread_mutex_init(&bitmap_mutex, NULL);
+  pthread_mutex_init(&seed_exec_mutex, NULL);
+  pthread_mutex_init(&status_mutex, NULL);
 
   listen_fd = get_tcp_server(port);
   if (listen_fd < 0)

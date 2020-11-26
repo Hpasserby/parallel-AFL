@@ -29,6 +29,10 @@ typedef struct exec_info {
 typedef struct node_status {
 
   uint64_t delta_execs;     /* 执行次数增量 */
+  struct {
+    uint64_t size;          /* 仅data的长度 */
+    uint64_t  data[0]; 
+  }; 
 
 } node_status_t;
 

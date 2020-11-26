@@ -220,6 +220,8 @@ static u8  stage_val_type;            /* Value type (STAGE_VAL_*)         */
 static u64 stage_finds[32],           /* Patterns found per fuzz stage    */
            stage_cycles[32];          /* Execs per fuzz stage             */
 
+static u64 stage_cnt[8];             /* 各个变异策略的执行计数           */
+
 static u32 rand_cnt;                  /* Random number counter            */
 
 static u64 total_cal_us,              /* Total calibration time (us)      */
@@ -2560,7 +2562,7 @@ do_upload:
     fatal("[-] malloc");
 
   seed_info->size = sizeof(seed_info_t) + len;
-  seed_info->flag = 0;
+  seed_info->flag = (cur_mutation & (M_HAVOC_A | M_SPLICE)) ? M_HAVOC : cur_mutation;
   seed_info->seed_len = len;
   seed_info->handicap = 0;  /* 不需要上传 由服务端填入 */
   seed_info->depth = cur_depth;
@@ -2720,20 +2722,48 @@ static void write_stats_file(double bitmap_cvg, double stability, double eps) {
 
 /* 上传本节点的状态信息 */
 
-static int maybe_put_status() {
+static int maybe_put_status(u8 need_stage) {
 
   static uint64_t last_execs = 0;
-  int ret = 0;
-  node_status_t status;
+  static uint64_t last_stage_cnt[8];
+  
+  int i, ret = 0;
+  uint64_t delta_stage_cnt[8] = {0};
+
+  node_status_t *status;
   packet_info_t *pinfo;
  
   if(last_execs == total_execs)
     return ret;
 
-  status.delta_execs = total_execs - last_execs;
+  if(need_stage) {
+  
+    status = (node_status_t*)malloc(sizeof(node_status_t) + sizeof(stage_cnt));
+    if(status == NULL)
+      fatal("[-] malloc");
+
+    for(i = 0; i < 8; i++)
+      delta_stage_cnt[i] = stage_cnt[i] - last_stage_cnt[i];
+
+    status->size = sizeof(stage_cnt);
+  
+    memcpy(status->data, delta_stage_cnt, status->size);
+    memcpy(last_stage_cnt, stage_cnt, sizeof(stage_cnt));
+
+  } else {
+
+    status = (node_status_t*)malloc(sizeof(node_status_t));
+    if(status == NULL)
+      fatal("[-] malloc");
+  
+    status->size = 0;
+    
+  }
+
+  status->delta_execs = total_execs - last_execs;
   last_execs = total_execs; 
 
-  pinfo = new_packet(PUT_STATUS, &status, sizeof(status));
+  pinfo = new_packet(PUT_STATUS, status, sizeof(node_status_t) + status->size);
   if(pinfo == NULL)
     fatal("[-] new_packet");
 
@@ -2743,6 +2773,7 @@ static int maybe_put_status() {
     stop_soon = 1;
   }
 
+  free(status);
   free(pinfo);
   return ret;
 
@@ -3147,7 +3178,7 @@ static void show_stats(void) {
   if (cur_ms - last_putstats_ms > 1000) {
 
     last_putstats_ms = cur_ms;
-    maybe_put_status();
+    maybe_put_status(0);
 
   }
 
@@ -3797,7 +3828,7 @@ static u8 check_duplicate(u8* out_buf, u32 len) {
   MD5Final(&md5, md5_value);
   md5_string = MD5toString(md5_value);
 
-  einfo.mut_stage = cur_mutation == M_HAVOC_A ? M_HAVOC : cur_mutation;
+  einfo.mut_stage = (cur_mutation & (M_HAVOC_A | M_SPLICE)) ? M_HAVOC : cur_mutation;
   memcpy(einfo.seed_hash, md5_string, 32);
 
   pinfo = new_packet(CHECK_DUP, &einfo, sizeof(einfo));
@@ -4365,7 +4396,6 @@ out_err:
 
 /* 向服务器获取fuzz任务
  *    fd              - 网络套接字描述符
- *    mutation_type   - 变异策略 若输入为M_SPLICE则请求随机种子
  */
 
 static struct queue_entry* request_seed(char** argv, u8* mutation_type, u8 random) {
@@ -4570,6 +4600,7 @@ static u8 mutation_bit_flip(char** argv, s32 len, u8* out_buf){
 
   stage_finds[STAGE_FLIP1]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_FLIP1] += stage_max;
+  stage_cnt[MUT_IDX(M_BITFLIP)] += stage_max;
 
   /* Two walking bits. */
 
@@ -4597,6 +4628,7 @@ static u8 mutation_bit_flip(char** argv, s32 len, u8* out_buf){
 
   stage_finds[STAGE_FLIP2]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_FLIP2] += stage_max;
+  stage_cnt[MUT_IDX(M_BITFLIP)] += stage_max;
 
   /* Four walking bits. */
 
@@ -4628,6 +4660,7 @@ static u8 mutation_bit_flip(char** argv, s32 len, u8* out_buf){
 
   stage_finds[STAGE_FLIP4]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_FLIP4] += stage_max;
+  stage_cnt[MUT_IDX(M_BITFLIP)] += stage_max;
 
   /* Walking byte. */
 
@@ -4653,6 +4686,7 @@ static u8 mutation_bit_flip(char** argv, s32 len, u8* out_buf){
 
   stage_finds[STAGE_FLIP8]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_FLIP8] += stage_max;
+  stage_cnt[MUT_IDX(M_BITFLIP)] += stage_max;
 
   /* Two walking bytes. */
 
@@ -4682,6 +4716,7 @@ static u8 mutation_bit_flip(char** argv, s32 len, u8* out_buf){
 
   stage_finds[STAGE_FLIP16]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_FLIP16] += stage_max;
+  stage_cnt[MUT_IDX(M_BITFLIP)] += stage_max;
 
   if (len < 4) return 0;
 
@@ -4711,6 +4746,7 @@ static u8 mutation_bit_flip(char** argv, s32 len, u8* out_buf){
 
   stage_finds[STAGE_FLIP32]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_FLIP32] += stage_max;
+  stage_cnt[MUT_IDX(M_BITFLIP)] += stage_max;
 
   return 0;
 
@@ -4786,6 +4822,7 @@ static u8 mutation_arith(char** argv, s32 len, u8* out_buf){
 
   stage_finds[STAGE_ARITH8]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_ARITH8] += stage_max;
+  stage_cnt[MUT_IDX(M_ARITH)] += stage_max;
 
   /* 16-bit arithmetics, both endians. */
 
@@ -4873,6 +4910,7 @@ static u8 mutation_arith(char** argv, s32 len, u8* out_buf){
 
   stage_finds[STAGE_ARITH16]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_ARITH16] += stage_max;
+  stage_cnt[MUT_IDX(M_ARITH)] += stage_max;
 
   /* 32-bit arithmetics, both endians. */
 
@@ -4957,6 +4995,7 @@ static u8 mutation_arith(char** argv, s32 len, u8* out_buf){
 
   stage_finds[STAGE_ARITH32]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_ARITH32] += stage_max;
+  stage_cnt[MUT_IDX(M_ARITH)] += stage_max;
   
   return 0;
 }
@@ -5016,6 +5055,7 @@ static u8 mutation_interest(char** argv, s32 len, u8* out_buf){
 
   stage_finds[STAGE_INTEREST8]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_INTEREST8] += stage_max;
+  stage_cnt[MUT_IDX(M_INTEREST)] += stage_max;
 
   /* Setting 16-bit integers, both endians. */
 
@@ -5077,6 +5117,7 @@ static u8 mutation_interest(char** argv, s32 len, u8* out_buf){
 
   stage_finds[STAGE_INTEREST16]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_INTEREST16] += stage_max;
+  stage_cnt[MUT_IDX(M_INTEREST)] += stage_max;
 
   if (len < 4) return 0;
 
@@ -5138,6 +5179,7 @@ static u8 mutation_interest(char** argv, s32 len, u8* out_buf){
 
   stage_finds[STAGE_INTEREST32]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_INTEREST32] += stage_max;
+  stage_cnt[MUT_IDX(M_INTEREST)] += stage_max;
 
   return 0;
 }
@@ -5214,6 +5256,7 @@ static u8 mutation_extras(char** argv, s32 len, u8* out_buf, u8* in_buf){
 
   stage_finds[STAGE_EXTRAS_UO]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_EXTRAS_UO] += stage_max;
+  stage_cnt[MUT_IDX(M_EXTRAS)] += stage_max;
 
   /* Insertion of user-supplied extras. */
 
@@ -5263,6 +5306,7 @@ static u8 mutation_extras(char** argv, s32 len, u8* out_buf, u8* in_buf){
 
   stage_finds[STAGE_EXTRAS_UI]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_EXTRAS_UI] += stage_max;
+  stage_cnt[MUT_IDX(M_EXTRAS)] += stage_max;
 
 skip_user_extras:
 
@@ -5313,6 +5357,7 @@ skip_user_extras:
 
   stage_finds[STAGE_EXTRAS_AO]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_EXTRAS_AO] += stage_max;
+  stage_cnt[MUT_IDX(M_EXTRAS)] += stage_max;
 
   return 0;
 }
@@ -5785,9 +5830,11 @@ havoc_stage:
   if (!splice_cycle) {
     stage_finds[STAGE_HAVOC]  += new_hit_cnt - orig_hit_cnt;
     stage_cycles[STAGE_HAVOC] += stage_max;
+    stage_cnt[MUT_IDX(M_HAVOC)] += stage_max;
   } else {
     stage_finds[STAGE_SPLICE]  += new_hit_cnt - orig_hit_cnt;
     stage_cycles[STAGE_SPLICE] += stage_max;
+    stage_cnt[MUT_IDX(M_HAVOC)] += stage_max;
   }
 
 #ifndef IGNORE_FINDS
@@ -6021,6 +6068,8 @@ abandon_entry:
 
   if (in_buf != orig_in) ck_free(in_buf);
   ck_free(out_buf);
+
+  maybe_put_status(1);
 
   return ret_val;
 
