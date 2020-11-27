@@ -4596,7 +4596,7 @@ static void  update_stage_prob() {
   u32 stage, idx;
   u64 cur_total_execs;
   double max_ratio = 0;
-  double ratios[8];
+  double ratios[8] = {0};
   double cur_ratio;
   
   static u64 last_stage_fnd[8] = {0};
@@ -4604,7 +4604,7 @@ static void  update_stage_prob() {
   static u64 last_total_execs = 0;
  
   /* 更新间隔至少执行1M次 */
-  if(total_execs - last_total_execs < (1 << 20)) 
+  if(total_execs - last_total_execs < 1e6) 
     return;
 
   pthread_mutex_lock(&status_mutex);
@@ -4615,8 +4615,8 @@ static void  update_stage_prob() {
   for(stage = M_BITFLIP; stage <= M_HAVOC; stage <<= 1) {
 
     idx = MUT_IDX(stage);
-    /* 若策略未执行 保留上次ratios */
-    if(stage_cnt[idx] - last_stage_cnt[idx] == 0) {
+    /* 若策略执行次数过少 保留上次ratios */
+    if(stage_cnt[idx] - last_stage_cnt[idx] < 1e5) {
       continue;
     }
 
@@ -4640,7 +4640,7 @@ static void  update_stage_prob() {
   for(stage = M_BITFLIP; stage <= M_HAVOC; stage <<= 1) {
 
     idx = MUT_IDX(stage);
-    if(stage_cnt[idx] == 0) {
+    if(stage_cnt[idx] == 0 || ratios[idx] == 0) {
       continue;
     }
 
