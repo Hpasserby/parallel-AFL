@@ -226,8 +226,9 @@ static s32 stage_cur_byte,            /* Byte offset of current stage op  */
 
 static u8  stage_val_type;            /* Value type (STAGE_VAL_*)         */
 
-static u64 stage_fnd[8];
-static u64 stage_cnt[8];
+static u64 stage_fnd[8];              /* 各个策略发现的新种子数           */
+static u64 stage_cnt[8];              /* 各个策略的执行次数               */
+static u32 stage_prob[8];             /* 策略的执行概率                   */
 
 static u32 rand_cnt;                  /* Random number counter            */
 
@@ -323,6 +324,9 @@ static pthread_mutex_t bitmap_mutex;
 static pthread_mutex_t seed_exec_mutex; 
 /* 状态信息互斥锁 */
 static pthread_mutex_t status_mutex;
+
+/* 记录当前分发的任务数 */
+static uint64_t task_count;
 
 /* 监听端口 */
 static uint32_t port;
@@ -4302,41 +4306,46 @@ static void show_stats(void) {
        cRST "%-10s " bSTG bV "\n", " ",  DI(max_depth));
 
   if (!skip_deterministic)
-    sprintf(tmp, "%5s/%5s (%s/10k)", 
+    sprintf(tmp, "%5s/%5s (%5s/100k, %3u%%)", 
         DI(stage_fnd[MUT_IDX(M_BITFLIP)]), DI(stage_cnt[MUT_IDX(M_BITFLIP)]), 
-        DF(((double)stage_fnd[MUT_IDX(M_BITFLIP)]) * 10000 / stage_cnt[MUT_IDX(M_BITFLIP)]));
+        DF(((double)stage_fnd[MUT_IDX(M_BITFLIP)]) * 100000 / stage_cnt[MUT_IDX(M_BITFLIP)]),
+        stage_prob[MUT_IDX(M_BITFLIP)]);
 
   SAYF(bV bSTOP "   bit flips : " cRST "%-37s " bSTG bV bSTOP "   pending : "
        cRST "%-10s " bSTG bV "\n", tmp, DI(pending_not_fuzzed));
 
   if (!skip_deterministic)
-    sprintf(tmp, "%5s/%5s (%s/10k)", 
+    sprintf(tmp, "%5s/%5s (%5s/100k, %3u%%)", 
         DI(stage_fnd[MUT_IDX(M_ARITH)]), DI(stage_cnt[MUT_IDX(M_ARITH)]),
-        DF(((double)stage_fnd[MUT_IDX(M_ARITH)]) * 10000 / stage_cnt[MUT_IDX(M_ARITH)]));
+        DF(((double)stage_fnd[MUT_IDX(M_ARITH)]) * 100000 / stage_cnt[MUT_IDX(M_ARITH)]),
+        stage_prob[MUT_IDX(M_ARITH)]);
 
   SAYF(bV bSTOP " arithmetics : " cRST "%-37s " bSTG bV bSTOP "  pend fav : "
        cRST "%-10s " bSTG bV "\n", tmp, DI(pending_favored));
 
   if (!skip_deterministic)
-    sprintf(tmp, "%5s/%5s (%s/10k)", 
+    sprintf(tmp, "%5s/%5s (%5s/100k, %3u%%)", 
         DI(stage_fnd[MUT_IDX(M_INTEREST)]), DI(stage_cnt[MUT_IDX(M_INTEREST)]),
-        DF(((double)stage_fnd[MUT_IDX(M_INTEREST)]) * 10000 / stage_cnt[MUT_IDX(M_INTEREST)]));
+        DF(((double)stage_fnd[MUT_IDX(M_INTEREST)]) * 100000 / stage_cnt[MUT_IDX(M_INTEREST)]),
+        stage_prob[MUT_IDX(M_INTEREST)]);
 
   SAYF(bV bSTOP "  known ints : " cRST "%-37s " bSTG bV bSTOP " own finds : "
        cRST "%-10s " bSTG bV "\n", tmp, DI(queued_discovered));
 
   if (!skip_deterministic)
-    sprintf(tmp, "%5s/%5s (%s/10k)", 
+    sprintf(tmp, "%5s/%5s (%5s/100k, %3u%%)", 
         DI(stage_fnd[MUT_IDX(M_EXTRAS)]), DI(stage_cnt[MUT_IDX(M_EXTRAS)]), 
-        DF(((double)stage_fnd[MUT_IDX(M_EXTRAS)]) * 10000 / stage_cnt[MUT_IDX(M_EXTRAS)]));
+        DF(((double)stage_fnd[MUT_IDX(M_EXTRAS)]) * 100000 / stage_cnt[MUT_IDX(M_EXTRAS)]),
+        stage_prob[MUT_IDX(M_EXTRAS)]);
 
   SAYF(bV bSTOP "  dictionary : " cRST "%-37s " bSTG bV bSTOP
        "  imported : " cRST "%-10s " bSTG bV "\n", tmp,
         DI(queued_imported));
 
-  sprintf(tmp, "%5s/%5s (%s/10k)", 
+  sprintf(tmp, "%5s/%5s (%5s/100k, %3u%%)", 
       DI(stage_fnd[MUT_IDX(M_HAVOC)]), DI(stage_cnt[MUT_IDX(M_HAVOC)]), 
-      DF(((double)stage_fnd[MUT_IDX(M_HAVOC)]) * 10000 / stage_cnt[MUT_IDX(M_HAVOC)]));
+      DF(((double)stage_fnd[MUT_IDX(M_HAVOC)]) * 100000 / stage_cnt[MUT_IDX(M_HAVOC)]),
+      stage_prob[MUT_IDX(M_HAVOC)]);
 
   SAYF(bV bSTOP "       havoc : " cRST "%-37s " bSTG bV bSTOP, tmp);
 
@@ -4582,6 +4591,75 @@ static int handle_new_client(int listen_fd) {
 }
 
 
+static void  update_stage_prob() {
+
+  u32 stage, idx;
+  u64 cur_total_execs;
+  double max_ratio = 0;
+  double ratios[8];
+  double cur_ratio;
+  
+  static u64 last_stage_fnd[8] = {0};
+  static u64 last_stage_cnt[8] = {0};
+  static u64 last_total_execs = 0;
+ 
+  /* 更新间隔至少执行1M次 */
+  if(total_execs - last_total_execs < (1 << 20)) 
+    return;
+
+  pthread_mutex_lock(&status_mutex);
+
+  cur_total_execs = total_execs;
+
+  /* 寻找性价比最高的确定性变异策略 */
+  for(stage = M_BITFLIP; stage <= M_HAVOC; stage <<= 1) {
+
+    idx = MUT_IDX(stage);
+    /* 若策略未执行 保留上次ratios */
+    if(stage_cnt[idx] - last_stage_cnt[idx] == 0) {
+      continue;
+    }
+
+    cur_ratio = (double)(stage_fnd[idx] - last_stage_fnd[idx]) *
+                (double)(cur_total_execs - last_total_execs) /
+                (double)(stage_cnt[idx] - last_stage_cnt[idx]);
+
+    /* 保留历史成绩的影响 */
+    ratios[idx] = ratios[idx] * 0.75 + cur_ratio * 0.25;
+
+    if(max_ratio < ratios[idx] && stage != M_HAVOC)
+      max_ratio = ratios[idx];
+  
+    last_stage_fnd[idx] = stage_fnd[idx];
+    last_stage_cnt[idx] = stage_cnt[idx];
+
+  }
+
+  pthread_mutex_unlock(&status_mutex);
+
+  for(stage = M_BITFLIP; stage <= M_HAVOC; stage <<= 1) {
+
+    idx = MUT_IDX(stage);
+    if(stage_cnt[idx] == 0) {
+      continue;
+    }
+
+    if(max_ratio / ratios[idx] < 10.0)
+      stage_prob[idx] = 100;
+    else if(max_ratio / ratios[idx] < 100.0)
+      stage_prob[idx] = 75;
+    else if(max_ratio / ratios[idx] < 1000.0)
+      stage_prob[idx] = 50;
+    else
+      stage_prob[idx] = 25;
+
+  }
+    
+  last_total_execs = cur_total_execs;
+
+}
+
+
 static u8 next_stage(struct queue_entry* entry) {
 
   u8 stage;
@@ -4592,8 +4670,10 @@ static u8 next_stage(struct queue_entry* entry) {
 
     if(MUT_CHECK(stage_bits, stage))
       continue;
-    
-    // TODO 进行策略的跳过
+   
+    /* 一定概率跳过该策略 */
+    if(UR(100) > stage_prob[MUT_IDX(stage)])
+      continue;
 
     MUT_SET(entry->stage_bits, stage);
     break;
@@ -4832,6 +4912,11 @@ static int handle_get_task(int cfd, packet_info_t *pinfo) {
   ret = send_packet(cfd, resp);
   if (ret <= 0)
     close(cfd);
+
+  __sync_add_and_fetch(&task_count, 1);
+
+  if(task_count % STAGE_PROB_UPDATE_INTERVAL == 0)
+    update_stage_prob();
 
   free(resp);
   free(seed);
@@ -5146,6 +5231,7 @@ static int handle_request(char** argv, int client_fd) {
 
 static int initialize_server() {
 
+  int i;
   int listen_fd;
 
   signal(SIGPIPE, SIG_IGN);
@@ -5160,6 +5246,8 @@ static int initialize_server() {
   pthread_mutex_init(&bitmap_mutex, NULL);
   pthread_mutex_init(&seed_exec_mutex, NULL);
   pthread_mutex_init(&status_mutex, NULL);
+
+  for(i = 0; i < 8; i++) stage_prob[i] = 100;
 
   listen_fd = get_tcp_server(port);
   if (listen_fd < 0)

@@ -359,6 +359,9 @@
 
 // #define IGNORE_FINDS
 
+/* 策略执行概率更新间隔 */
+#define STAGE_PROB_UPDATE_INTERVAL 5
+
 /* 策略选择 */
 #define M_BITFLIP   (1 << 0)
 #define M_ARITH     (1 << 1)
