@@ -105,7 +105,7 @@
 
 
 #define MAX_EVENT_COUNT   32    /* epoll最大单次处理事件数 */ 
-#define QUEUE_TIMEOUT     10    /* 任务队列等待超时时间 */
+#define QUEUE_TIMEOUT     20    /* 任务队列等待超时时间 */
 #define MAX_THREAD_COUNT  32    /* 最大任务线程数 */
 
 EXP_ST u8 *in_dir,                    /* Input directory with test cases  */
@@ -3924,6 +3924,7 @@ dir_cleanup_failed:
 
 
 static void check_term_size(void);
+static void update_stage_prob(void);
 
 
 /* A spiffy retro stats screen! This is called every stats_update_freq
@@ -3931,7 +3932,7 @@ static void check_term_size(void);
 
 static void show_stats(void) {
 
-  static u64 last_stats_ms, last_plot_ms, last_ms, last_execs;
+  static u64 last_stats_ms, last_plot_ms, last_ms, last_execs, last_status_ms;
   static double avg_exec;
   double t_byte_ratio, stab_ratio;
   struct queue_entry *next_seed = queue_cur ? queue_cur : queue;
@@ -4010,6 +4011,15 @@ static void show_stats(void) {
     last_plot_ms = cur_ms;
     maybe_update_plot_file(t_byte_ratio, avg_exec);
  
+  }
+
+  /* 至少每10分钟更新一次 */
+
+  if (cur_ms - last_status_ms > 10 * 60 * 1000) {
+
+    last_stats_ms = cur_ms;
+    update_stage_prob();
+
   }
 
   /* Honor AFL_EXIT_WHEN_DONE and AFL_BENCH_UNTIL_CRASH. */
@@ -4597,19 +4607,19 @@ static void  update_stage_prob() {
   u64 cur_total_execs;
   double max_ratio = 0;
   double ratios[8] = {0};
-  double cur_ratio;
+  double cur_ratio, all_ratio;
   
   static u64 last_stage_fnd[8] = {0};
   static u64 last_stage_cnt[8] = {0};
   static u64 last_total_execs = 0;
  
-  /* 更新间隔至少执行1M次 */
-  if(total_execs - last_total_execs < 1e6) 
-    return;
-
-  pthread_mutex_lock(&status_mutex);
-
   cur_total_execs = total_execs;
+  
+  /* 更新间隔至少执行1M次 */
+  if(cur_total_execs - last_total_execs < 1e6) 
+    return;
+  
+  pthread_mutex_lock(&status_mutex);
 
   /* 寻找性价比最高的确定性变异策略 */
   for(stage = M_BITFLIP; stage <= M_HAVOC; stage <<= 1) {
@@ -4620,12 +4630,14 @@ static void  update_stage_prob() {
       continue;
     }
 
-    cur_ratio = (double)(stage_fnd[idx] - last_stage_fnd[idx]) *
+    cur_ratio = (double)(stage_fnd[idx] - last_stage_fnd[idx] + 0.5) *
                 (double)(cur_total_execs - last_total_execs) /
                 (double)(stage_cnt[idx] - last_stage_cnt[idx]);
 
-    /* 保留历史成绩的影响 */
-    ratios[idx] = ratios[idx] * 0.75 + cur_ratio * 0.25;
+    all_ratio = (double)(stage_fnd[idx] + 0.5) * ((double)total_execs / stage_cnt[idx]);
+
+    /* 同时考虑整体成绩和最近成绩 */
+    ratios[idx] = all_ratio * 0.5 + cur_ratio * 0.5;
 
     if(max_ratio < ratios[idx] && stage != M_HAVOC)
       max_ratio = ratios[idx];
@@ -4635,6 +4647,7 @@ static void  update_stage_prob() {
 
   }
 
+  last_total_execs = cur_total_execs;
   pthread_mutex_unlock(&status_mutex);
 
   for(stage = M_BITFLIP; stage <= M_HAVOC; stage <<= 1) {
@@ -4655,8 +4668,6 @@ static void  update_stage_prob() {
 
   }
     
-  last_total_execs = cur_total_execs;
-
 }
 
 
@@ -4914,9 +4925,6 @@ static int handle_get_task(int cfd, packet_info_t *pinfo) {
     close(cfd);
 
   __sync_add_and_fetch(&task_count, 1);
-
-  if(task_count % STAGE_PROB_UPDATE_INTERVAL == 0)
-    update_stage_prob();
 
   free(resp);
   free(seed);

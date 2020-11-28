@@ -2722,8 +2722,9 @@ static void write_stats_file(double bitmap_cvg, double stability, double eps) {
 
 /* 上传本节点的状态信息 */
 
-static int maybe_put_status(u8 need_stage) {
+static int maybe_put_status() {
 
+  u8 status_changed = 0;
   static uint64_t last_execs = 0;
   static uint64_t last_stage_cnt[8];
   
@@ -2736,14 +2737,17 @@ static int maybe_put_status(u8 need_stage) {
   if(last_execs == total_execs)
     return ret;
 
-  if(need_stage) {
+  for(i = 0; i < 8; i++) {
+    delta_stage_cnt[i] = stage_cnt[i] - last_stage_cnt[i];
+    if(delta_stage_cnt[i] != 0)
+      status_changed = 1;
+  }
+
+  if(status_changed) {
   
     status = (node_status_t*)malloc(sizeof(node_status_t) + sizeof(stage_cnt));
     if(status == NULL)
       fatal("[-] malloc");
-
-    for(i = 0; i < 8; i++)
-      delta_stage_cnt[i] = stage_cnt[i] - last_stage_cnt[i];
 
     status->size = sizeof(stage_cnt);
   
@@ -3178,7 +3182,7 @@ static void show_stats(void) {
   if (cur_ms - last_putstats_ms > 1000) {
 
     last_putstats_ms = cur_ms;
-    maybe_put_status(0);
+    maybe_put_status();
 
   }
 
@@ -6068,8 +6072,6 @@ abandon_entry:
 
   if (in_buf != orig_in) ck_free(in_buf);
   ck_free(out_buf);
-
-  maybe_put_status(1);
 
   return ret_val;
 
