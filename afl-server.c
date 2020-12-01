@@ -325,9 +325,6 @@ static pthread_mutex_t seed_exec_mutex;
 /* 状态信息互斥锁 */
 static pthread_mutex_t status_mutex;
 
-/* 记录当前分发的任务数 */
-static uint64_t task_count;
-
 /* 监听端口 */
 static uint32_t port;
 
@@ -3935,7 +3932,7 @@ static void show_stats(void) {
   static u64 last_stats_ms, last_plot_ms, last_ms, last_execs, last_prob_ms;
   static double avg_exec;
   double t_byte_ratio, stab_ratio;
-  struct queue_entry *next_seed = queue_cur ? queue_cur : queue;
+  struct queue_entry *next_seed = queue_cur ? queue_cur : queue_top;
 
   u64 cur_ms;
   u32 t_bytes, t_bits;
@@ -4690,9 +4687,7 @@ static u8 next_stage(struct queue_entry* entry) {
     if(UR(100) > stage_prob[MUT_IDX(stage)])
       continue;
 
-    if(stage != M_HAVOC)
-      MUT_SET(entry->stage_bits, stage);
-
+    MUT_SET(entry->stage_bits, stage);
     break;
 
   }
@@ -4929,8 +4924,6 @@ static int handle_get_task(int cfd, packet_info_t *pinfo) {
   ret = send_packet(cfd, resp);
   if (ret <= 0)
     close(cfd);
-
-  __sync_add_and_fetch(&task_count, 1);
 
   free(resp);
   free(seed);

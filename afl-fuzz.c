@@ -2734,12 +2734,12 @@ static int maybe_put_status() {
   node_status_t *status;
   packet_info_t *pinfo;
  
-  if(last_execs == total_execs)
+  if(total_execs - last_execs < 1e3)
     return ret;
 
   for(i = 0; i < 8; i++) {
     delta_stage_cnt[i] = stage_cnt[i] - last_stage_cnt[i];
-    if(delta_stage_cnt[i] != 0)
+    if(delta_stage_cnt[i] > 1e4)
       status_changed = 1;
   }
 
