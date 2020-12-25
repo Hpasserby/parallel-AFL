@@ -289,6 +289,7 @@ struct extra_data {
   u8* data;                           /* Dictionary token data            */
   u32 len;                            /* Dictionary token length          */
   u32 hit_cnt;                        /* Use count in the corpus          */
+  u64 timestamp;                      /* 添加该extra的时间                */
 };
 
 static struct extra_data* extras;     /* Extra tokens to fuzz with        */
@@ -324,6 +325,8 @@ static pthread_mutex_t bitmap_mutex;
 static pthread_mutex_t seed_exec_mutex; 
 /* 状态信息互斥锁 */
 static pthread_mutex_t status_mutex;
+/* 字典更新互斥锁 */
+static pthread_mutex_t extras_mutex;
 
 /* 监听端口 */
 static uint32_t port;
@@ -1814,7 +1817,7 @@ static inline u8 memcmp_nocase(u8* m1, u8* m2, u32 len) {
 
 /* Maybe add automatic extra. */
 
-static void maybe_add_auto(u8* mem, u32 len) {
+static void maybe_add_auto(u8* mem, u32 len, u64 timestamp) {
 
   u32 i;
 
@@ -1871,6 +1874,7 @@ static void maybe_add_auto(u8* mem, u32 len) {
     if (a_extras[i].len == len && !memcmp_nocase(a_extras[i].data, mem, len)) {
 
       a_extras[i].hit_cnt++;
+      a_extras[i].timestamp = timestamp;
       goto sort_a_extras;
 
     }
@@ -1888,6 +1892,7 @@ static void maybe_add_auto(u8* mem, u32 len) {
 
     a_extras[a_extras_cnt].data = ck_memdup(mem, len);
     a_extras[a_extras_cnt].len  = len;
+    a_extras[a_extras_cnt].timestamp = timestamp;
     a_extras_cnt++;
 
   } else {
@@ -1899,6 +1904,7 @@ static void maybe_add_auto(u8* mem, u32 len) {
 
     a_extras[i].data    = ck_memdup(mem, len);
     a_extras[i].len     = len;
+    a_extras[i].timestamp = timestamp;
     a_extras[i].hit_cnt = 0;
 
   }
@@ -1951,7 +1957,9 @@ static void save_auto(void) {
 static void load_auto(void) {
 
   u32 i;
+  u64 timestamp;
 
+  timestamp = get_cur_time();
   for (i = 0; i < USE_AUTO_EXTRAS; i++) {
 
     u8  tmp[MAX_AUTO_EXTRA + 1];
@@ -1976,7 +1984,7 @@ static void load_auto(void) {
     if (len < 0) PFATAL("Unable to read from '%s'", fn);
 
     if (len >= MIN_AUTO_EXTRA && len <= MAX_AUTO_EXTRA)
-      maybe_add_auto(tmp, len);
+      maybe_add_auto(tmp, len, timestamp);
 
     close(fd);
     ck_free(fn);
@@ -3964,7 +3972,7 @@ static void show_stats(void) {
     /* If there is a dramatic (5x+) jump in speed, reset the indicator
        more quickly. */
 
-    if ((cur_avg * 5 < avg_exec || cur_avg / 5 > avg_exec) && cur_ms - last_ms > 1200)
+    if ((cur_avg * 5 < avg_exec || cur_avg / 5 > avg_exec) && cur_ms - last_ms > 5000)
       avg_exec = cur_avg;
 
     avg_exec = avg_exec * (1.0 - 1.0 / (AVG_SMOOTHING)) +
@@ -4604,7 +4612,7 @@ static void  update_stage_prob() {
   u64 cur_total_execs;
   double max_ratio = 0;
   double ratios[8] = {0};
-  double cur_ratio, all_ratio;
+  double rec_ratio, cur_ratio, all_ratio;
   
   static u64 last_stage_fnd[8] = {0};
   static u64 last_stage_cnt[8] = {0};
@@ -4635,10 +4643,12 @@ static void  update_stage_prob() {
     cur_ratio = (double)(stage_fnd[idx] - last_stage_fnd[idx] + 0.01) * 1e7 /
                 (double)(stage_cnt[idx] - last_stage_cnt[idx]);
 
+    rec_ratio = rec_ratio * 0.7 + cur_ratio * 0.3;
+
     all_ratio = (double)(stage_fnd[idx] + 0.01) * 1e7 / stage_cnt[idx];
 
     /* 同时考虑整体成绩和最近成绩 */
-    ratios[idx] = all_ratio * 0.5 + cur_ratio * 0.5;
+    ratios[idx] = all_ratio * 0.5 + rec_ratio * 0.5;
 
     if(max_ratio < ratios[idx])
       max_ratio = ratios[idx];
@@ -4658,11 +4668,11 @@ static void  update_stage_prob() {
       continue;
     }
 
-    if(max_ratio / ratios[idx] < 4.0)
+    if(max_ratio / ratios[idx] < 2.0)
       stage_prob[idx] = 100;
-    else if(max_ratio / ratios[idx] < 32.0)
+    else if(max_ratio / ratios[idx] < 4.0)
       stage_prob[idx] = 75;
-    else if(max_ratio / ratios[idx] < 256.0)
+    else if(max_ratio / ratios[idx] < 16.0)
       stage_prob[idx] = 50;
     else
       stage_prob[idx] = 25;
@@ -5106,6 +5116,96 @@ static int handle_put_status(packet_info_t *pinfo) {
 
 }
 
+static extras_pack_t* get_updated_extras(u64 from_time) {
+
+  u32 i;
+  extras_pack_t *ex_pack;
+  extra_info_t *cur_ex = NULL;
+
+  ex_pack = (extras_pack_t*)ck_alloc(sizeof(extras_pack_t));
+  ex_pack->size = sizeof(extras_pack_t);
+  ex_pack->timestamp = get_cur_time();
+
+  for(i = 0; i < a_extras_cnt; i++) {
+
+    u64 last_ex_size;
+
+    if(a_extras[i].timestamp > from_time) {
+
+      if(cur_ex)
+        cur_ex->next_off = sizeof(extra_info_t) + cur_ex->length;
+      
+      last_ex_size = ex_pack->size;
+
+      ex_pack->size += sizeof(extra_info_t) + a_extras[i].len;
+      ex_pack = ck_realloc(ex_pack, ex_pack->size);
+
+      cur_ex = (extra_info_t*)((u8*)ex_pack + last_ex_size);
+
+      cur_ex->length    = a_extras[i].len;
+      cur_ex->next_off  = 0;
+      memcpy(cur_ex->data, a_extras[i].data, a_extras[i].len);
+
+    }
+
+  }
+
+  return ex_pack;
+
+}
+
+static int handle_sync_extras(int cfd, packet_info_t *pinfo) {
+
+  u32 ret;
+  u64 timestamp;
+  extras_pack_t *ex_pack, *ex_resp;
+  extra_info_t *cur_ex = NULL;
+  packet_info_t *presp;
+
+  ex_pack = (extras_pack_t*)packet_data(pinfo);
+  if(ex_pack == NULL)
+    return 1;
+ 
+  pthread_mutex_lock(&extras_mutex);
+
+  /* 在合并上传数据前 先发送最新的extras */
+
+  /* 一定要在发送前获取时间戳 */
+  timestamp = get_cur_time();
+  ex_resp = get_updated_extras(ex_pack->timestamp); 
+
+  presp = new_packet(SYNC_EXTRAS, ex_resp, ex_resp->size);
+  if(presp == NULL)
+    fatal("[-] new_packet");
+
+  ret = send_packet(cfd, presp);
+  if(ret <= 0) {
+    fprintf(stderr, "sync extras: socket error\n");
+    stop_soon = 1;
+  }
+
+  free(presp);
+  ck_free(ex_resp);
+
+  /* 处理上传的extras */
+  
+  if(ex_pack->size != sizeof(extras_pack_t))
+    cur_ex = (extra_info_t*)ex_pack->extras;
+
+  while(cur_ex) {
+
+    maybe_add_auto(cur_ex->data, cur_ex->length, timestamp);
+    
+    if(cur_ex->next_off == 0)
+      break;
+    cur_ex = (extra_info_t*)((u8*)cur_ex + cur_ex->next_off);
+
+  }
+
+  pthread_mutex_unlock(&extras_mutex);
+
+  return 0;
+}
 
 /* 执行节点的请求。从任务队列中获取请求事件并处理，若一段时间内
    队列中无新事件，则退出线程 */
@@ -5156,6 +5256,10 @@ static void* work_thread(void *arg) {
 
       case PUT_STATUS:
         handle_put_status(pinfo);
+        break;
+
+      case SYNC_EXTRAS:
+        handle_sync_extras(cfd, pinfo);
         break;
 
 #ifdef DUP_TEST
@@ -5253,6 +5357,7 @@ static int initialize_server() {
   pthread_mutex_init(&bitmap_mutex, NULL);
   pthread_mutex_init(&seed_exec_mutex, NULL);
   pthread_mutex_init(&status_mutex, NULL);
+  pthread_mutex_init(&extras_mutex, NULL);
 
   for(i = 0; i < 8; i++) stage_prob[i] = 100;
 

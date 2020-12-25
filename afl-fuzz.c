@@ -279,6 +279,7 @@ struct extra_data {
   u8* data;                           /* Dictionary token data            */
   u32 len;                            /* Dictionary token length          */
   u32 hit_cnt;                        /* Use count in the corpus          */
+  u64 timestamp;
 };
 
 static struct extra_data* extras;     /* Extra tokens to fuzz with        */
@@ -309,7 +310,6 @@ typedef struct seed_cache_entry {
 } seed_cache_entry_t;
 
 static seed_cache_entry_t seed_cache[CACHE_MAX];
-
 static u32 last_id;
 
 static u8 cur_mutation;
@@ -823,6 +823,108 @@ sock_err:
   fprintf(stderr, "[-] sync_bitmap: socket error");
   stop_soon = 1;
   return -1;
+
+}
+
+
+static extras_pack_t* get_updated_extras(u64 from_time) {
+
+  u32 i;
+  extras_pack_t * ex_pack;
+  extra_info_t *cur_ex = NULL;
+
+  ex_pack = (extras_pack_t*)ck_alloc(sizeof(extras_pack_t));
+  ex_pack->size = sizeof(extras_pack_t);
+  /* 这里的timestamp表示上一次同步的时间 */
+  ex_pack->timestamp = from_time;
+
+  for(i = 0; i < a_extras_cnt; i++) {
+
+    u64 last_ex_size;
+
+    if(a_extras[i].timestamp > from_time) {
+
+      if(cur_ex)
+        cur_ex->next_off = sizeof(extra_info_t) + cur_ex->length;
+      
+      last_ex_size = ex_pack->size;
+
+      ex_pack->size += sizeof(extra_info_t) + a_extras[i].len;
+      ex_pack = ck_realloc(ex_pack, ex_pack->size);
+
+      cur_ex = (extra_info_t*)((u8*)ex_pack + last_ex_size);
+
+      cur_ex->length    = a_extras[i].len;
+      cur_ex->next_off  = 0;
+      memcpy(cur_ex->data, a_extras[i].data, a_extras[i].len);
+
+    }
+
+  }
+
+  return ex_pack;
+
+}
+
+static void maybe_add_auto(u8* mem, u32 len, u64 timestamp);
+
+static int sync_extras() {
+
+  static u64 last_sync_time;
+  u32 ret;
+  packet_info_t *pinfo;
+  extras_pack_t *ex_pack;
+  extra_info_t *cur_ex = NULL;
+
+  /* 更新间隔至少5分钟 */
+  if(get_cur_time() - last_sync_time < 5 * 60 * 1024)
+    return 0;
+
+  /* 上传本地extras */
+
+  ex_pack = get_updated_extras(last_sync_time);
+
+  pinfo = new_packet(SYNC_EXTRAS, ex_pack, ex_pack->size);
+  if(pinfo == NULL) 
+    fatal("[-] new_packet");
+
+  ret = send_packet(sock_fd, pinfo);
+  if(ret <= 0) {
+    fprintf(stderr, "sync extras: socket error\n");
+    stop_soon = 1;
+    return ret;
+  }
+
+  free(pinfo);
+  ck_free(ex_pack);
+
+  /* 接收远程extras */
+
+  pinfo = recv_packet(sock_fd);
+  if(pinfo == NULL) {
+    fprintf(stderr, "sync extras: socket error\n");
+    stop_soon = 1;
+    return 1;
+  }
+
+  ex_pack = packet_data(pinfo);
+  if(ex_pack->size != sizeof(extras_pack_t))
+    cur_ex = (extra_info_t*)ex_pack->extras;
+    
+  while(cur_ex) {
+  
+    maybe_add_auto(cur_ex->data, cur_ex->length, ex_pack->timestamp);
+    
+    if(cur_ex->next_off == 0)
+      break;
+    cur_ex = (extra_info_t*)((u8*)cur_ex + cur_ex->next_off);
+  
+  }
+
+  last_sync_time = ex_pack->timestamp;
+
+  free(pinfo);
+  return 0;
 
 }
 
@@ -1580,7 +1682,7 @@ static inline u8 memcmp_nocase(u8* m1, u8* m2, u32 len) {
 
 /* Maybe add automatic extra. */
 
-static void maybe_add_auto(u8* mem, u32 len) {
+static void maybe_add_auto(u8* mem, u32 len, u64 timestamp) {
 
   u32 i;
 
@@ -1637,6 +1739,7 @@ static void maybe_add_auto(u8* mem, u32 len) {
     if (a_extras[i].len == len && !memcmp_nocase(a_extras[i].data, mem, len)) {
 
       a_extras[i].hit_cnt++;
+      a_extras[i].timestamp = timestamp;
       goto sort_a_extras;
 
     }
@@ -1654,6 +1757,7 @@ static void maybe_add_auto(u8* mem, u32 len) {
 
     a_extras[a_extras_cnt].data = ck_memdup(mem, len);
     a_extras[a_extras_cnt].len  = len;
+    a_extras[a_extras_cnt].timestamp = timestamp;
     a_extras_cnt++;
 
   } else {
@@ -1665,6 +1769,7 @@ static void maybe_add_auto(u8* mem, u32 len) {
 
     a_extras[i].data    = ck_memdup(mem, len);
     a_extras[i].len     = len;
+    a_extras[i].timestamp = timestamp;
     a_extras[i].hit_cnt = 0;
 
   }
@@ -2734,7 +2839,7 @@ static int maybe_put_status() {
   node_status_t *status;
   packet_info_t *pinfo;
  
-  if(total_execs - last_execs < 1e3)
+  if(total_execs - last_execs < 2e3)
     return ret;
 
   for(i = 0; i < 8; i++) {
@@ -3179,7 +3284,7 @@ static void show_stats(void) {
 
   /* 每秒上传一次状态信息 */
 
-  if (cur_ms - last_putstats_ms > 1000) {
+  if (cur_ms - last_putstats_ms > 2000) {
 
     last_putstats_ms = cur_ms;
     maybe_put_status();
@@ -4238,6 +4343,9 @@ static int initialize_client() {
 
   exec_tmout = status->exec_tmout;
   havoc_div = status->havoc_div;
+  free(pinfo);
+
+  sync_extras();
 
   memset(seed_cache, 0, sizeof(seed_cache));
 
@@ -4571,7 +4679,7 @@ static u8 mutation_bit_flip(char** argv, s32 len, u8* out_buf){
         a_len++;
 
         if (a_len >= MIN_AUTO_EXTRA && a_len <= MAX_AUTO_EXTRA)
-          maybe_add_auto(a_collect, a_len);
+          maybe_add_auto(a_collect, a_len, get_cur_time());
 
       } else if (cksum != prev_cksum) {
 
@@ -4579,7 +4687,7 @@ static u8 mutation_bit_flip(char** argv, s32 len, u8* out_buf){
            worthwhile queued up, and collect that if the answer is yes. */
 
         if (a_len >= MIN_AUTO_EXTRA && a_len <= MAX_AUTO_EXTRA)
-          maybe_add_auto(a_collect, a_len);
+          maybe_add_auto(a_collect, a_len, get_cur_time());
 
         a_len = 0;
         prev_cksum = cksum;
@@ -6033,6 +6141,7 @@ static u8 fuzz_one(char** argv, u8 mutation_type) {
   
     case M_BITFLIP:
       mutation_bit_flip(argv, len, out_buf);
+      sync_extras();
       break;
 
     case M_ARITH:
@@ -6044,6 +6153,7 @@ static u8 fuzz_one(char** argv, u8 mutation_type) {
       break;
 
     case M_EXTRAS:
+      sync_extras();
       mutation_extras(argv, len, out_buf, in_buf);
       break;
 

@@ -1,6 +1,7 @@
 #ifndef NETWORKING_H
 #define NETWORKING_H
 
+#include <stdint.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <netinet/in.h>
@@ -13,6 +14,7 @@
 #define SYNC_BITMAP 4   /* 请求同步位图 */
 #define CHECK_DUP   5   /* 实验用 查询种子是否重复 */
 #define INIT_INFO   6   /* 节点初始化 */
+#define SYNC_EXTRAS 7   /* 同步auto extras */
 
 #ifdef DUP_TEST
 
@@ -24,6 +26,22 @@ typedef struct exec_info {
 } exec_info_t;
 
 #endif
+
+typedef struct extras_pack {
+
+  uint64_t size;            /* 整个结构体大小 */
+  uint64_t timestamp;       /* 时间戳 */
+  uint8_t extras[];         /* extra_info列表 */
+
+} extras_pack_t;
+
+typedef struct extra_info {
+
+  uint64_t length;          /* 该extras的长度 */ 
+  uint64_t next_off;        /* 下一条extras的偏移 */
+  uint8_t  data[];          /* extras内容 */
+
+} extra_info_t;
 
 
 typedef struct node_status {
